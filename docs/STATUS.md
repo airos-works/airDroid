@@ -70,12 +70,19 @@
 ## GPU plan
 
 1. Done: virgl (GL) through virglrenderer on EGL, frames read back.
-2. Venus (Vulkan): Waydroid's vendor image has `vulkan.virtio`; the host
-   side is virglrenderer's Venus on RADV/NVK. Blocker: Venus maps host
-   GPU memory into the guest (virtio-gpu blob/hostmem), and NVMM on
-   air/OS replaces a mapped region with its own memory object instead of
-   mapping the existing pages. Needs the NVMM driver to map an existing
-   area's cache into the guest.
+2. Venus (Vulkan), experimental (`gpu: "venus"`, not offered in the
+   settings window): QEMU gets blob resources, a host memory window and
+   venus=on, Android `ro.hardware.vulkan=virtio` (Waydroid's vendor image
+   has Mesa's Venus driver). Tried on Linux/KVM with lavapipe (QEMU on
+   Xvfb, SDL GL): Android enumerates the Venus device and the host render
+   server starts, but rendering into gralloc buffers ends in "aborting on
+   ring fatal error": virglrenderer's Venus shares memory with GL through
+   GBM and dma-bufs, which a host without a render node lacks. On air/OS
+   it needs (a) that external memory path ported to air/OS's GPU stack
+   (virglrenderer there is built without GBM) and (b) NVMM mapping an
+   existing area into the guest (blob/hostmem): NVMM's hva_map always
+   replaces the range with new anonymous memory (as NetBSD's does). Both
+   need GPU hardware to develop.
 3. Zero-copy display: present virtio-gpu resources straight from the
    host's GL/Vulkan instead of reading them back (needs the resources'
    textures shared between QEMU and the airDroid app, or QEMU presenting).

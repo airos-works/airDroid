@@ -73,8 +73,9 @@ pub struct VmConfig {
     pub height: u32,
     pub dpi: u32,
     pub multi_windows: bool,
-    /// "none" (Android renders with SwiftShader) or "virgl" (virtio-gpu
-    /// with virglrenderer on the host's GPU through EGL).
+    /// "none" (Android renders with SwiftShader), "virgl" (virtio-gpu with
+    /// virglrenderer on the host's GPU through EGL) or "venus" (virgl for
+    /// OpenGL ES, and Vulkan through Venus on the host's Vulkan driver).
     pub gpu: String,
     /// Extra environment for QEMU (which Mesa its EGL uses).
     pub env: Vec<(String, String)>,
@@ -116,8 +117,18 @@ impl VmConfig {
             push(&["-L", &p(fw)]);
         }
         push(&["-nodefaults", "-no-user-config", "-no-reboot"]);
-        if self.gpu == "virgl" {
-            push(&["-display", "egl-headless", "-device", "virtio-gpu-gl-pci"]);
+        if self.gpu == "virgl" || self.gpu == "venus" {
+            // QEMU's GL context: EGL without a window (AIRDROID_QEMU_DISPLAY
+            // overrides it, e.g. "sdl,gl=on" on a host without a render node)
+            let display = std::env::var("AIRDROID_QEMU_DISPLAY").unwrap_or_else(|_| "egl-headless".into());
+            push(&["-display", &display]);
+            if self.gpu == "venus" {
+                // Vulkan too: Venus needs blob resources mapped through a
+                // host memory window
+                push(&["-device", "virtio-gpu-gl-pci,blob=on,hostmem=4G,venus=on"]);
+            } else {
+                push(&["-device", "virtio-gpu-gl-pci"]);
+            }
         } else {
             push(&["-display", "none"]);
         }

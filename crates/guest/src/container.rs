@@ -235,13 +235,14 @@ pub fn make_props(cfg: &Config, extra: &[(String, String)]) -> String {
     set("ro.adb.secure", "1");
     set("ro.debuggable", "0");
     match cfg.gpu.as_str() {
-        "virgl" => {
+        "virgl" | "venus" => {
             // Mesa's virgl driver on virtio-gpu (what Waydroid sets for a
-            // DRI node); Vulkan stays on lavapipe until Venus works
+            // DRI node); Vulkan through Venus (Mesa's virtio driver) when the
+            // host has it, else lavapipe
             set("ro.hardware.gralloc", "gbm");
             set("ro.hardware.egl", "mesa");
             set("gralloc.gbm.device", "/dev/dri/renderD128");
-            set("ro.hardware.vulkan", "lvp");
+            set("ro.hardware.vulkan", if cfg.gpu == "venus" { "virtio" } else { "lvp" });
         }
         _ => {
             set("ro.hardware.gralloc", "default");
