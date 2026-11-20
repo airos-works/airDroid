@@ -96,6 +96,7 @@ fn main() {
         multi_windows: multi,
         gpu: arg(&args, "--gpu").unwrap_or_else(|| "none".into()),
         env: Vec::new(),
+        share: arg(&args, "--share").map(PathBuf::from),
     };
     eprintln!("dev: qemu {}", cfg.args().join(" "));
     let mut child = cfg.spawn().expect("start qemu");

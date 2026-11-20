@@ -78,6 +78,9 @@ pub struct VmConfig {
     pub gpu: String,
     /// Extra environment for QEMU (which Mesa its EGL uses).
     pub env: Vec<(String, String)>,
+    /// A host folder Android sees as /sdcard/airOS (virtio-9p, tag
+    /// "airdroid_share").
+    pub share: Option<PathBuf>,
 }
 
 impl VmConfig {
@@ -148,6 +151,14 @@ impl VmConfig {
         }
         push(&["-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0,romfile="]);
         push(&["-device", "virtio-rng-pci", "-rtc", "base=utc,clock=host"]);
+        if let Some(dir) = &self.share {
+            // air/OS: passthrough (the app is root there, and the owners
+            // Android sets mean nothing to air/OS); elsewhere a user can't
+            // chown, so ownership and modes live in extended attributes
+            let model = if cfg!(target_os = "haiku") { "passthrough" } else { "mapped-xattr" };
+            push(&["-fsdev", &format!("local,id=share,path={},security_model={model},multidevs=remap", p(dir))]);
+            push(&["-device", "virtio-9p-pci,fsdev=share,mount_tag=airdroid_share"]);
+        }
         a
     }
 

@@ -78,7 +78,37 @@ pub fn prepare_desktop() {
     ] {
         let _ = shell_user(argv);
     }
+    mount_share();
     wake();
+}
+
+/// The host's shared folder (virtio-9p "airdroid_share"), as /sdcard/airOS:
+/// mounted in Android's own mount namespace over /data/media/0/airOS, the
+/// storage behind /sdcard, so every app's view of it shows the files.
+fn mount_share() {
+    let has_share = std::fs::read_dir("/sys/bus/virtio/drivers/9pnet_virtio")
+        .map(|d| {
+            d.flatten().any(|e| std::fs::read_to_string(e.path().join("mount_tag")).is_ok_and(|t| t.trim_end_matches('\0').trim() == "airdroid_share"))
+        })
+        .unwrap_or(false);
+    if !has_share {
+        return;
+    }
+    // Android's storage (MediaProvider, behind /sdcard) works on these
+    // files as group media_rw: the share's files become media_rw's, group
+    // writable (on air/OS owners mean nothing; elsewhere QEMU keeps them in
+    // extended attributes). Files added on the desktop later stay readable.
+    let dir = "/data/media/0/airOS";
+    let script = format!(
+        "mkdir -p {dir} && \
+         (grep -q ' {dir} ' /proc/mounts || mount -t 9p -o trans=virtio,version=9p2000.L,msize=512000,access=client,cache=none airdroid_share {dir}) && \
+         chown -R media_rw:media_rw {dir} && chmod -R ug+rwX {dir}"
+    );
+    match exec::run(&["/system/bin/sh", "-c", &script], true, &[]) {
+        Ok((0, _, _)) => logf!("shared folder: /sdcard/airOS"),
+        Ok((code, _, err)) => logf!("shared folder: mount failed ({code}): {}", String::from_utf8_lossy(&err).trim()),
+        Err(e) => logf!("shared folder: {e}"),
+    }
 }
 
 /// Brings Android's focus to the apps: wakes the display, dismisses the

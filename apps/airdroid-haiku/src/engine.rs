@@ -372,6 +372,20 @@ impl Engine {
         }
     }
 
+    /// The folder Android sees as /sdcard/airOS, created when missing.
+    fn shared_folder(&self) -> Option<PathBuf> {
+        let s = self.settings.shared_folder.trim();
+        if s.is_empty() {
+            return None;
+        }
+        let dir = match s.strip_prefix("~/") {
+            Some(rest) => PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/boot/home".into())).join(rest),
+            None => PathBuf::from(s),
+        };
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir)
+    }
+
     fn start_vm(&mut self) {
         if matches!(self.phase, Phase::Starting | Phase::Booted | Phase::Downloading) {
             return;
@@ -412,6 +426,7 @@ impl Engine {
             (_, Some(_)) => ("none".to_string(), Vec::new()), // llvmpipe only: SwiftShader is faster
         };
         let images = self.paths.images();
+        let share = self.shared_folder();
         let cfg = VmConfig {
             qemu: res.qemu,
             firmware: res.firmware,
@@ -431,6 +446,7 @@ impl Engine {
             multi_windows: self.settings.multi_windows,
             gpu,
             env,
+            share,
         };
         if cfg.accel == Accel::Tcg {
             self.status("Starting Android (no hardware virtualization: this will be slow)…");

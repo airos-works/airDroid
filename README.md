@@ -10,8 +10,17 @@ air/OS:
   from BViews.
 * **No copies over a wire**: guest RAM is a shared file, so the app reads
   Android's frame buffers in place.
-* **GPU acceleration**: software rendering (SwiftShader) first, then
-  Venus/virgl over air/OS's Mesa stack (see [docs/ROADMAP.md](docs/ROADMAP.md)).
+* **GPU acceleration**: Android's OpenGL ES runs on the host GPU through
+  virgl (virglrenderer on air/OS's Mesa); Vulkan (Venus) is next.
+
+What works, as in Waydroid: installing apps from `.apk` files (open one,
+or `airdroid app install`), each app in its own resizable window or the
+whole Android UI in one, Deskbar entries for Android apps, keyboard, mouse
+and touch, the clipboard both ways, sound and the microphone, Android's
+notifications on the desktop, networking, a shared folder (`~/Android` is
+`/sdcard/airOS`), and Waydroid's command line as `airdroid` (`shell`,
+`logcat`, `app install|remove|launch|list|intent`, `prop`, `show-full-ui`,
+`upgrade`, `status`, `stop`).
 
 Haiku has no Linux kernel to share, so where Waydroid starts an LXC container,
 airDroid starts a small Linux VM (QEMU with NVMM, the same stack as

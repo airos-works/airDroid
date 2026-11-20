@@ -21,6 +21,9 @@ pub struct Settings {
     pub mouse_as_touch: bool,
     /// "auto" (virgl when there is a GPU with EGL), "virgl" or "none".
     pub gpu: String,
+    /// The folder shared with Android (as /sdcard/airOS); "~/" is the home
+    /// folder, empty shares nothing.
+    pub shared_folder: String,
 }
 
 impl Default for Settings {
@@ -36,6 +39,7 @@ impl Default for Settings {
             flavour: "VANILLA".into(),
             mouse_as_touch: false,
             gpu: "auto".into(),
+            shared_folder: "~/Android".into(),
         }
     }
 }

@@ -24,6 +24,11 @@
   auto (virgl when there is a GPU), virgl, none (SwiftShader).
   Verified in the test VM with llvmpipe; not yet on GPU hardware.
 
+* Shared folder: `~/Android` on air/OS is `/sdcard/airOS` in Android
+  (virtio-9p, mounted in Android's namespace over its storage, so every
+  app and the Files app see it); setting `shared_folder` ("" to turn it
+  off). Waydroid's data is a host folder; airDroid's is a disk image, so
+  this is how files go back and forth.
 * Microphone: Android's record streams (PulseAudio, through Waydroid's
   audio HAL) get the system's audio input (BMediaRecorder on the default
   input node, converted to the stream's rate, channels and format), or
