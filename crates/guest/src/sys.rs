@@ -5,7 +5,7 @@ use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::Duration;
 
 pub fn cstr<P: AsRef<Path>>(p: P) -> CString {
@@ -127,65 +127,102 @@ pub fn monotonic_ns() -> u64 {
 
 // ---- child reaping ---------------------------------------------------------
 //
-// As PID 1 the daemon inherits every orphan in the VM, so one thread reaps
-// all children and records exit codes; code that started a process waits
-// for its pid here instead of calling waitpid itself.
+// As PID 1 the daemon inherits every orphan in the VM. Children it starts
+// itself are registered (under SPAWN, together with the spawn) and waited
+// for by their owner; a scanner reaps only the zombies nobody registered.
+// (std's Command::spawn waits for a child whose exec failed: a reaper that
+// took every child made that waitpid fail, and std panics on that.)
 
-struct Reaper {
-    exits: Mutex<HashMap<i32, i32>>,
-    cond: Condvar,
+use std::collections::HashSet;
+use std::process::{Child, Command};
+
+static SPAWN: Mutex<Option<HashSet<i32>>> = Mutex::new(None);
+
+/// Spawns and registers a child (wait for it with `wait_child`).
+pub fn spawn(cmd: &mut Command) -> io::Result<Child> {
+    let mut g = SPAWN.lock().unwrap();
+    let child = cmd.spawn()?;
+    g.get_or_insert_with(HashSet::new).insert(child.id() as i32);
+    Ok(child)
 }
 
-fn reaper() -> &'static Reaper {
-    static R: OnceLock<Reaper> = OnceLock::new();
-    R.get_or_init(|| Reaper { exits: Mutex::new(HashMap::new()), cond: Condvar::new() })
+/// Registers a child started another way (raw clone).
+pub fn track(pid: i32) {
+    SPAWN.lock().unwrap().get_or_insert_with(HashSet::new).insert(pid);
 }
 
-pub fn start_reaper() {
-    let _ = reaper();
-    std::thread::Builder::new()
-        .name("reaper".into())
-        .spawn(|| loop {
-            let mut status = 0;
-            let pid = unsafe { libc::waitpid(-1, &mut status, 0) };
-            if pid < 0 {
-                if io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                continue;
-            }
-            let code = if libc::WIFEXITED(status) {
-                libc::WEXITSTATUS(status)
-            } else if libc::WIFSIGNALED(status) {
-                128 + libc::WTERMSIG(status)
-            } else {
-                continue;
-            };
-            let r = reaper();
-            let mut exits = r.exits.lock().unwrap();
-            if exits.len() > 4096 {
-                exits.clear(); // orphans nobody waits for
-            }
-            exits.insert(pid, code);
-            r.cond.notify_all();
-        })
-        .expect("reaper thread");
-}
-
-/// Wait for a child started by this daemon; returns its exit code
-/// (128+signal when killed).
-pub fn wait_pid(pid: i32) -> i32 {
-    let r = reaper();
-    let mut exits = r.exits.lock().unwrap();
-    loop {
-        if let Some(code) = exits.remove(&pid) {
-            return code;
-        }
-        exits = r.cond.wait(exits).unwrap();
+fn untrack(pid: i32) {
+    if let Some(s) = SPAWN.lock().unwrap().as_mut() {
+        s.remove(&pid);
     }
 }
 
-/// Non-blocking: Some(exit code) once the child has exited.
-pub fn try_wait_pid(pid: i32) -> Option<i32> {
-    reaper().exits.lock().unwrap().remove(&pid)
+fn exit_code(status: i32) -> i32 {
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
+    } else {
+        -1
+    }
+}
+
+/// Waits for a registered child; its exit code (128+signal when killed).
+pub fn wait_child(child: &mut Child) -> i32 {
+    let pid = child.id() as i32;
+    let code = match child.wait() {
+        Ok(st) => {
+            use std::os::unix::process::ExitStatusExt;
+            st.code().unwrap_or_else(|| 128 + st.signal().unwrap_or(0))
+        }
+        Err(_) => -1,
+    };
+    untrack(pid);
+    code
+}
+
+/// Waits for a registered child by pid.
+pub fn wait_pid(pid: i32) -> i32 {
+    let mut status = 0;
+    let code = loop {
+        let r = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if r == pid {
+            break exit_code(status);
+        }
+        if r < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            break -1;
+        }
+    };
+    untrack(pid);
+    code
+}
+
+pub fn start_reaper() {
+    std::thread::Builder::new()
+        .name("reaper".into())
+        .spawn(|| {
+            let me = std::process::id().to_string();
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                let g = SPAWN.lock().unwrap();
+                let Ok(dir) = std::fs::read_dir("/proc") else { continue };
+                for e in dir.flatten() {
+                    let name = e.file_name();
+                    let Some(pid) = name.to_str().and_then(|n| n.parse::<i32>().ok()) else { continue };
+                    if g.as_ref().is_some_and(|s| s.contains(&pid)) {
+                        continue;
+                    }
+                    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+                    // "pid (comm) S ppid ..." - comm may contain spaces
+                    let Some(rest) = stat.rsplit_once(')').map(|(_, r)| r) else { continue };
+                    let mut f = rest.split_whitespace();
+                    let (state, ppid) = (f.next(), f.next());
+                    if state == Some("Z") && ppid == Some(me.as_str()) {
+                        let mut status = 0;
+                        unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+                    }
+                }
+            }
+        })
+        .expect("reaper thread");
 }

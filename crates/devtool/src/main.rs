@@ -10,7 +10,7 @@
 //!   install FILE.apk | launch PACKAGE | fullui | prop KEY VALUE | quit
 
 use airdroid_core::compose::{Buffer, Canvas};
-use airdroid_core::guestmem::{q35_lowmem, GuestMem};
+use airdroid_core::guestmem::GuestMem;
 use airdroid_core::proto::{ToGuest, ToHost, TouchKind};
 use airdroid_core::session::Session;
 use airdroid_core::vm::{Accel, VmConfig};
@@ -67,17 +67,16 @@ fn main() {
     if !userdata.exists() {
         airdroid_core::qcow2::create(&userdata, 32 << 30).expect("create userdata");
     }
-    let ram_file = PathBuf::from(format!("/dev/shm/airdroid-dev-{}.ram", std::process::id()));
     let cfg = VmConfig {
         qemu: PathBuf::from(arg(&args, "--qemu").unwrap_or_else(|| "qemu-system-x86_64".into())),
-        firmware: None,
+        firmware: arg(&args, "--firmware").map(PathBuf::from),
         kernel: guest.join("vmlinuz"),
         initrd: guest.join("initramfs.img"),
         system_img: images.join("system.img"),
         vendor_img: images.join("vendor.img"),
         userdata,
         state_dir: state.clone(),
-        ram_file: ram_file.clone(),
+        ram: airdroid_core::vm::RamBackend::for_platform(&state),
         ram_mb,
         cpus,
         accel: Accel::detect(),
@@ -90,9 +89,8 @@ fn main() {
     eprintln!("dev: qemu {}", cfg.args().join(" "));
     let mut child = cfg.spawn().expect("start qemu");
     let (session, rx) = Session::connect(&cfg.socket(), Duration::from_secs(20)).expect("connect to the VM");
-    // QEMU has created the RAM file by the time the socket exists
-    let mem = Arc::new(GuestMem::open(&ram_file, cfg.ram_bytes(), q35_lowmem(cfg.ram_bytes())).expect("map guest RAM"));
-    let _ = std::fs::remove_file(&ram_file); // QEMU and we keep it mapped
+    // guest RAM is mapped once the guest talks (QEMU set it up by then)
+    let mut mem: Option<Arc<GuestMem>> = None;
     let host = Arc::new(Mutex::new(Host::default()));
     let start = Instant::now();
 
@@ -122,11 +120,18 @@ fn main() {
         let timeout = next_vsync.saturating_duration_since(Instant::now());
         match rx.recv_timeout(timeout) {
             Ok(msg) => match msg {
-                ToHost::Hello { version, kernel } => eprintln!("dev: guest protocol {version}, kernel {kernel}"),
+                ToHost::Hello { version, kernel } => {
+                    eprintln!("dev: guest protocol {version}, kernel {kernel}");
+                    match cfg.open_guest_mem() {
+                        Ok(m) => mem = Some(Arc::new(m)),
+                        Err(e) => eprintln!("dev: cannot map guest RAM: {e}"),
+                    }
+                }
                 ToHost::Status { stage, detail } => eprintln!("dev: [{:6.1}s] status {stage:?}: {detail}", start.elapsed().as_secs_f32()),
                 ToHost::Log { text } => eprintln!("dev: [{:6.1}s] guest: {text}", start.elapsed().as_secs_f32()),
                 ToHost::BufferNew { id, width, height, stride, format, ranges } => {
-                    let b = Buffer::new(&mem, width, height, stride, format, &ranges);
+                    let Some(mem) = mem.as_ref() else { continue };
+                    let b = Buffer::new(mem, width, height, stride, format, &ranges);
                     if !b.valid {
                         eprintln!("dev: buffer {id} {width}x{height} fmt {format:#x}: invalid ranges");
                     }

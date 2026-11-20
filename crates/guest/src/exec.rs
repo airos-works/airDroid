@@ -61,7 +61,7 @@ fn spawn_piped(argv: &[String], android: bool) -> io::Result<Child> {
     std::thread::spawn(move || -> io::Result<Child> {
         let mut cmd = command(&argv, android)?;
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        cmd.spawn()
+        sys::spawn(&mut cmd)
     })
     .join()
     .map_err(|_| io::Error::other("spawn thread panicked"))?
@@ -73,7 +73,6 @@ pub fn run(argv: &[&str], android: bool, stdin: &[u8]) -> io::Result<(i32, Vec<u
     let stdin = stdin.to_vec();
     (move || -> io::Result<(i32, Vec<u8>, Vec<u8>)> {
         let mut child = spawn_piped(&argv, android)?;
-        let pid = child.id() as i32;
         let mut sin = child.stdin.take().unwrap();
         let w = std::thread::spawn(move || {
             let _ = sin.write_all(&stdin);
@@ -88,7 +87,7 @@ pub fn run(argv: &[&str], android: bool, stdin: &[u8]) -> io::Result<(i32, Vec<u
         child.stdout.take().unwrap().read_to_end(&mut out)?;
         let _ = w.join();
         let errv = e.join().unwrap_or_default();
-        let code = sys::wait_pid(pid);
+        let code = sys::wait_child(&mut child);
         Ok((code, out, errv))
     })()
 }
@@ -119,7 +118,6 @@ pub fn spawn_for_host(link: HostLink, req: u32, argv: Vec<String>, android: bool
     std::thread::spawn(move || {
         let result = (|| -> io::Result<i32> {
             let mut child = spawn_piped(&argv, android)?;
-            let pid = child.id() as i32;
             let mut sin = child.stdin.take().unwrap();
             std::thread::spawn(move || {
                 let _ = sin.write_all(&stdin);
@@ -137,7 +135,7 @@ pub fn spawn_for_host(link: HostLink, req: u32, argv: Vec<String>, android: bool
             };
             let a = pump(Box::new(child.stdout.take().unwrap()), false, link.clone());
             let b = pump(Box::new(child.stderr.take().unwrap()), true, link.clone());
-            let code = sys::wait_pid(pid);
+            let code = sys::wait_child(&mut child);
             let _ = a.join();
             let _ = b.join();
             Ok(code)

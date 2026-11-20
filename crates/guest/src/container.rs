@@ -90,17 +90,14 @@ pub fn mount_data_disk(on_format: impl FnOnce()) -> io::Result<()> {
     if !has_ext4(&dev) {
         on_format();
         logf!("formatting {dev} (first start)");
-        let child = std::process::Command::new("/sbin/mke2fs")
-            .args(["-q", "-F", "-t", "ext4", "-L", "airdroid-data", "-E", "lazy_itable_init=1,lazy_journal_init=1", &dev])
-            .spawn()?;
-        // the PID 1 reaper collects every child: wait through it
-        let code = sys::wait_pid(child.id() as i32);
+        let mut child = sys::spawn(std::process::Command::new("/sbin/mke2fs").args(["-q", "-F", "-t", "ext4", "-L", "airdroid-data", &dev]))?;
+        let code = sys::wait_child(&mut child);
         if code != 0 {
             return Err(io::Error::other(format!("mke2fs {dev} exited {code}")));
         }
     }
     sys::mkdir_p(DATA_DISK, 0o755)?;
-    sys::mount(&dev, DATA_DISK, "ext4", libc::MS_NOATIME, Some("discard"))?;
+    sys::mount(&dev, DATA_DISK, "ext4", libc::MS_NOATIME, None)?;
     for d in ["data", "overlay_rw/system", "overlay_rw/vendor", "overlay_work/system", "overlay_work/vendor"] {
         sys::mkdir_p(&format!("{DATA_DISK}/{d}"), 0o755)?;
     }
@@ -366,6 +363,7 @@ pub fn start() -> io::Result<i32> {
             libc::_exit(127);
         }
     }
+    sys::track(pid as i32);
     Ok(pid as i32)
 }
 

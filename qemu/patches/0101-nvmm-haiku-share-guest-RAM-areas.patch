@@ -1,0 +1,86 @@
+--- a/target/i386/nvmm/nvmm-all.c	2026-11-20 21:53:05.649850580 +1100
++++ b/target/i386/nvmm/nvmm-all.c	2026-11-20 21:53:22.386188899 +1100
+@@ -29,6 +29,48 @@
+ #include "nvmm-accel-ops.h"
+ 
+ #include <nvmm.h>
++#ifdef __HAIKU__
++#include <OS.h>
++
++/*
++ * airDroid: nvmm_hva_map() replaces a RAM block's host mapping with an NVMM
++ * VM object, so a file-backed memory backend cannot share guest RAM with
++ * another process. Instead the RAM areas are made cloneable and, when
++ * QEMU_NVMM_MAP_FILE names a file, every guest-physical RAM section is
++ * appended to it as "map <gpa> <size> <area> <offset>" (hex; area is the
++ * area id, offset the section's start within it) or "unmap <gpa> <size>",
++ * so a cooperating process can clone_area() the guest's memory.
++ */
++static void
++nvmm_haiku_log_mapping(hwaddr start_pa, ram_addr_t size, uintptr_t hva,
++    bool add)
++{
++    const char *path = getenv("QEMU_NVMM_MAP_FILE");
++    area_info info;
++    area_id area;
++    FILE *f;
++
++    if (path == NULL || *path == '\0') {
++        return;
++    }
++    f = fopen(path, "a");
++    if (f == NULL) {
++        return;
++    }
++    if (add) {
++        area = area_for((void *)hva);
++        if (area >= 0 && get_area_info(area, &info) == B_OK) {
++            fprintf(f, "map %" PRIx64 " %" PRIx64 " %" PRIx32 " %" PRIx64 "\n",
++                (uint64_t)start_pa, (uint64_t)size, (uint32_t)area,
++                (uint64_t)(hva - (uintptr_t)info.address));
++        }
++    } else {
++        fprintf(f, "unmap %" PRIx64 " %" PRIx64 "\n", (uint64_t)start_pa,
++            (uint64_t)size);
++    }
++    fclose(f);
++}
++#endif
+ 
+ struct AccelCPUState {
+     struct nvmm_vcpu vcpu;
+@@ -1054,7 +1096,17 @@
+             prot |= PROT_WRITE;
+         }
+         ret = nvmm_gpa_map(mach, hva, start_pa, size, prot);
++#ifdef __HAIKU__
++        if (ret == 0 && !rom) {
++            nvmm_haiku_log_mapping(start_pa, size, hva, true);
++        }
++#endif
+     } else {
++#ifdef __HAIKU__
++        if (!rom) {
++            nvmm_haiku_log_mapping(start_pa, size, hva, false);
++        }
++#endif
+         ret = nvmm_gpa_unmap(mach, hva, start_pa, size);
+     }
+ 
+@@ -1156,6 +1208,16 @@
+     int ret;
+ 
+     ret = nvmm_hva_map(mach, hva, max_size);
++#ifdef __HAIKU__
++    if (ret == 0) {
++        /* let a cooperating process clone the guest's RAM (see above) */
++        area_id area = area_for(host);
++        if (area >= 0) {
++            set_area_protection(area, B_READ_AREA | B_WRITE_AREA
++                | B_CLONEABLE_AREA);
++        }
++    }
++#endif
+ 
+     if (ret == -1) {
+         error_report("NVMM: Failed to map HVA, HostVA:%p "

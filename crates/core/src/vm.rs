@@ -34,6 +34,25 @@ impl Accel {
     }
 }
 
+/// How the host gets at guest RAM (see guestmem.rs).
+#[derive(Debug, Clone)]
+pub enum RamBackend {
+    /// memory-backend-file,share=on at this path (Linux/KVM).
+    SharedFile(PathBuf),
+    /// airDroid's QEMU logs the NVMM RAM areas to this file (air/OS).
+    NvmmMap(PathBuf),
+}
+
+impl RamBackend {
+    pub fn for_platform(state_dir: &Path) -> RamBackend {
+        if cfg!(target_os = "haiku") {
+            RamBackend::NvmmMap(state_dir.join("ram.map"))
+        } else {
+            RamBackend::SharedFile(PathBuf::from(format!("/dev/shm/airdroid-{}.ram", std::process::id())))
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct VmConfig {
     pub qemu: PathBuf,
@@ -46,8 +65,7 @@ pub struct VmConfig {
     pub userdata: PathBuf,
     /// Where the console log, QEMU log and sockets go.
     pub state_dir: PathBuf,
-    /// The RAM file (shared with the host).
-    pub ram_file: PathBuf,
+    pub ram: RamBackend,
     pub ram_mb: u64,
     pub cpus: u32,
     pub accel: Accel,
@@ -88,13 +106,16 @@ impl VmConfig {
             push(&["-L", &p(fw)]);
         }
         push(&["-nodefaults", "-no-user-config", "-nographic", "-no-reboot"]);
-        push(&["-machine", "q35,memory-backend=ram0", "-accel", self.accel.name()]);
+        let machine = match self.ram {
+            RamBackend::SharedFile(_) => "q35,memory-backend=ram0",
+            RamBackend::NvmmMap(_) => "q35",
+        };
+        push(&["-machine", machine, "-accel", self.accel.name()]);
         push(&["-cpu", if self.accel == Accel::Tcg { "max" } else { "host" }]);
         push(&["-smp", &self.cpus.to_string(), "-m", &format!("{}M", self.ram_mb)]);
-        push(&[
-            "-object",
-            &format!("memory-backend-file,id=ram0,size={}M,mem-path={},share=on", self.ram_mb, p(&self.ram_file)),
-        ]);
+        if let RamBackend::SharedFile(f) = &self.ram {
+            push(&["-object", &format!("memory-backend-file,id=ram0,size={}M,mem-path={},share=on", self.ram_mb, p(f))]);
+        }
         push(&["-kernel", &p(&self.kernel), "-initrd", &p(&self.initrd), "-append", &cmdline]);
         push(&["-chardev", &format!("file,id=console,path={}", p(&self.console_log())), "-serial", "chardev:console"]);
         push(&["-device", "virtio-serial-pci"]);
@@ -109,7 +130,7 @@ impl VmConfig {
             if ro {
                 d.push_str(",readonly=on");
             } else {
-                d.push_str(",discard=unmap");
+                d.push_str("");
             }
             push(&["-drive", &d, "-device", &format!("virtio-blk-pci,drive={id},serial={id}")]);
         }
@@ -125,9 +146,32 @@ impl VmConfig {
         let _ = std::fs::remove_file(self.console_log());
         let log = std::fs::File::create(self.qemu_log())?;
         let mut cmd = Command::new(&self.qemu);
+        if let RamBackend::NvmmMap(map) = &self.ram {
+            let _ = std::fs::remove_file(map);
+            cmd.env("QEMU_NVMM_MAP_FILE", map);
+        }
         cmd.args(self.args()).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
         let child = cmd.spawn()?;
         let _ = std::fs::write(self.state_dir.join("qemu.pid"), format!("{}\n", child.id()));
         Ok(child)
+    }
+}
+
+impl VmConfig {
+    /// Maps guest RAM; call once the guest runs (QEMU has set RAM up by then).
+    pub fn open_guest_mem(&self) -> std::io::Result<crate::guestmem::GuestMem> {
+        use crate::guestmem::{q35_lowmem, GuestMem};
+        match &self.ram {
+            RamBackend::SharedFile(f) => {
+                let m = GuestMem::open_file(f, self.ram_bytes(), q35_lowmem(self.ram_bytes()));
+                // QEMU and we keep it mapped; nothing else needs the name
+                let _ = std::fs::remove_file(f);
+                m
+            }
+            #[cfg(target_os = "haiku")]
+            RamBackend::NvmmMap(map) => GuestMem::from_nvmm_map(map),
+            #[cfg(not(target_os = "haiku"))]
+            RamBackend::NvmmMap(_) => Err(std::io::Error::other("NVMM RAM sharing needs air/OS")),
+        }
     }
 }
