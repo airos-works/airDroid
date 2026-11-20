@@ -1486,10 +1486,16 @@ ad_register_types(const char* signature)
 		apk.Install();
 		apk.SetShortDescription("Android app");
 		apk.SetLongDescription("Android application package");
-		BMessage extensions;
-		extensions.AddString("extensions", "apk");
-		apk.SetFileExtensions(&extensions);
 	}
+	// Set every start (a type installed by an older airDroid lacks them).
+	// An APK is a zip, and sniffing wins over the extension: this rule
+	// outranks zip's (0.40) for the entries Android's build tools put
+	// first; the extension catches the rest.
+	BMessage extensions;
+	extensions.AddString("extensions", "apk");
+	apk.SetFileExtensions(&extensions);
+	apk.SetSnifferRule("0.60 [0] (\"PK\\003\\004\") [30] (\"AndroidManifest.xml\""
+		" | \"META-INF/com/android/build/\" | \"classes.dex\" | \"resources.arsc\")");
 	char preferred[B_MIME_TYPE_LENGTH];
 	if (apk.GetPreferredApp(preferred) != B_OK || preferred[0] == '\0')
 		apk.SetPreferredApp(signature);

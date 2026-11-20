@@ -92,6 +92,11 @@ pub struct Engine {
     modifiers: u32,
     apps: Vec<AppInfo>,
     installs: HashMap<u32, String>,
+    /// An install finished: the next app list's new apps get a notification.
+    announce_new_apps: bool,
+    /// The packages there were when the installs began (the list can
+    /// show a new app before its install answers).
+    install_baseline: Option<Vec<String>>,
     app_path: String,
     quitting: bool,
     epoch: Instant,
@@ -128,6 +133,8 @@ impl Engine {
             modifiers: 0,
             apps: Vec::new(),
             installs: HashMap::new(),
+            announce_new_apps: false,
+            install_baseline: None,
             quitting: false,
             epoch: Instant::now(),
             cancel_setup: Arc::new(AtomicBool::new(false)),
@@ -593,6 +600,9 @@ impl Engine {
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "app.apk".into());
                 let guest = format!("/data/waydroid_tmp/{}", name.replace(' ', "_"));
                 self.status(&format!("Installing {name}…"));
+                if self.install_baseline.is_none() && !self.apps.is_empty() {
+                    self.install_baseline = Some(self.apps.iter().map(|a| a.package.clone()).collect());
+                }
                 // the copy runs on its own thread: APKs can be large
                 let tx = self.tx.clone();
                 let req = s.next_req();
@@ -744,6 +754,9 @@ impl Engine {
                 let mut conn = self.waiters.remove(&req).unwrap();
                 if let Some(name) = self.installs.remove(&req) {
                     self.status(&format!("{name} {}.", if ok { "is installed" } else { "could not be installed" }));
+                    if ok {
+                        self.announce_installed();
+                    }
                 }
                 let kind = if ok { control::OUT } else { control::ERR };
                 if !message.trim().is_empty() {
@@ -755,6 +768,7 @@ impl Engine {
                 if let Some(name) = self.installs.remove(&req) {
                     if ok {
                         self.status(&format!("{name} is installed."));
+                        self.announce_installed();
                     } else {
                         self.status(&format!("Installing {name} failed."));
                         host::alert("airDroid", &format!("Installing {name} failed:\n\n{}", message.trim()));
@@ -870,6 +884,32 @@ impl Engine {
         host::main_set_apps(&list);
         self.sync_launchers(&shown);
         self.apps = shown;
+        if self.announce_new_apps {
+            // the list after the install's answer settles it (a reinstall
+            // adds no app)
+            self.announce_installed();
+            self.announce_new_apps = false;
+            self.install_baseline = None;
+        }
+    }
+
+    /// An install succeeded: a desktop notification per app that was not
+    /// there when the installs began (a click opens it). The app list may
+    /// come before or after the install's answer: without a new app yet,
+    /// the next list is checked.
+    fn announce_installed(&mut self) {
+        let Some(before) = &self.install_baseline else { return };
+        let new: Vec<&AppInfo> = self.apps.iter().filter(|a| !before.contains(&a.package)).collect();
+        if new.is_empty() {
+            self.announce_new_apps = true;
+            return;
+        }
+        for (n, a) in new.iter().enumerate() {
+            let name = display_name(a);
+            host::notify(INSTALL_NOTIFY_ID + n as u32, "airDroid", &a.package, &format!("{name} is installed"), "Click to open it. It is in Deskbar's Android apps menu too.", None, a.icon_png.as_deref());
+        }
+        self.announce_new_apps = false;
+        self.install_baseline = None;
     }
 
     /// One Deskbar entry per launchable app (Waydroid writes .desktop files).
@@ -1052,6 +1092,9 @@ impl Engine {
         }
     }
 }
+
+/// Notification ids of install announcements (Android's count up from 1).
+const INSTALL_NOTIFY_ID: u32 = 0x4000_0000;
 
 fn debug_log(text: &str) {
     if debug() {

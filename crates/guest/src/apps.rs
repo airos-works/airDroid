@@ -131,7 +131,9 @@ fn run(link: &HostLink, action: Action) -> Result<String, String> {
             Ok(out)
         }
         Action::Remove(package) => {
-            let out = sh(&["/system/bin/pm", "uninstall", &package])?;
+            // as the shell user: as root, pm's AppOps check finds no calling
+            // package and throws
+            let out = shell_user(&["/system/bin/pm", "uninstall", &package])?;
             list(link);
             Ok(out)
         }
@@ -217,17 +219,28 @@ fn list(link: &HostLink) {
     link.send(&ToHost::Apps { apps });
 }
 
-/// Re-sends the app list when the installed launcher apps change.
+/// Re-sends the app list when the installed launcher apps change, or
+/// when their icons do (Android writes a new app's icon a little after the
+/// app appears).
 pub fn watch_packages(link: HostLink) {
     std::thread::spawn(move || {
-        let mut last = launcher_components();
+        let state = || {
+            let comps = launcher_components();
+            let icons = format!("{}/data/icons", container::DATA_DISK);
+            let have: Vec<bool> = comps
+                .iter()
+                .map(|c| std::path::Path::new(&format!("{icons}/{}.png", c.split('/').next().unwrap_or(c))).exists())
+                .collect();
+            (comps, have)
+        };
+        let mut last = state();
         loop {
             std::thread::sleep(Duration::from_secs(5));
             if !exec::android_running() {
                 return;
             }
-            let now = launcher_components();
-            if now != last && !now.is_empty() {
+            let now = state();
+            if now != last && !now.0.is_empty() {
                 last = now;
                 list(&link);
             }
