@@ -75,6 +75,24 @@ Threadripper (AMD, NVMM's SVM path) with a GTX 1080 Ti:
   (e2fsck) and the computer never hung; the hang came with the corruption.
   airDroid runs on AMD again and is back in the images.
 
+## Host frame path (X399, 2026-11-21)
+
+The app's CPU time while Android scrolls Settings (multi-window, virgl,
+~325 frames over 5-6 s, screen on; teamcpu = user + kernel time):
+
+| build | app CPU | per frame |
+|---|---|---|
+| before (per-pixel compose, canvas copy) | 595-616 ms | ~1.9 ms |
+| fast compose paths (29a5d23) | 327-339 ms | ~1.0 ms |
+| composing into the window's bitmap (24971f0) | 244-246 ms | ~0.75 ms |
+
+On the build host (Xeon E5-2650 v4) composing a 1920x1080 frame: opaque
+XRGB + translucent bar 7.9 -> 1.4 ms; an RGBA app window that Android
+does not mark opaque 6.7 -> 1.7 ms. What remains per frame is reading
+guest memory once and app_server drawing the bitmap; Android's own
+frame times (median 10-20 ms, 0.3-1.2 % janky) come from Android and
+virgl, not the host path.
+
 ## Needs
 
 * air/OS with haiku 353344194f (NVMM page-protection fix), i.e. images from
