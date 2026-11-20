@@ -1,0 +1,37 @@
+# airDroid
+
+Android apps on air/OS. airDroid does what [Waydroid](https://github.com/waydroid/waydroid)
+does on Linux (a full LineageOS Android, apps installed from `.apk` files,
+each app in its own desktop window or the whole Android UI in one), built for
+air/OS:
+
+* **Rust throughout**: the air/OS app, the VM's init and its compositor.
+* **Be API, not Wayland**: Android's windows become BWindows; input comes
+  from BViews.
+* **No copies over a wire**: guest RAM is a shared file, so the app reads
+  Android's frame buffers in place.
+* **GPU acceleration**: software rendering (SwiftShader) first, then
+  Venus/virgl over air/OS's Mesa stack (see [docs/ROADMAP.md](docs/ROADMAP.md)).
+
+Haiku has no Linux kernel to share, so where Waydroid starts an LXC container,
+airDroid starts a small Linux VM (QEMU with NVMM, the same stack as
+air/OS's Docker `linuxvm`) whose only job is that container. It uses
+Waydroid's own system and vendor images unchanged.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it fits together,
+[docs/BUILDING.md](docs/BUILDING.md) to build and test, and
+[docs/STATUS.md](docs/STATUS.md) for where it stands.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `crates/proto` | host ↔ guest wire protocol |
+| `crates/guest` | `airdroid-guest`: the VM's PID 1 (container, compositor, app actions) |
+| `crates/core` | host side: QEMU, qcow2 disks, guest memory, session, layer composition |
+| `crates/devtool` | `airdroid-dev`: headless runner for Linux/KVM development |
+| `apps/airdroid-haiku` | the air/OS app (Be API) |
+| `kernel/` | guest kernel config fragment |
+| `tools/` | build scripts (kernel, guest initramfs, Haiku cross build, packaging) |
+
+License: GPL-3.0-or-later (Waydroid is GPL-3.0).

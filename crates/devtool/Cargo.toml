@@ -1,0 +1,11 @@
+[package]
+name = "airdroid-dev"
+description = "Runs the airDroid VM headless on a Linux development host (KVM)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+airdroid-core = { path = "../core" }
+png = "0.17"

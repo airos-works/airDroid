@@ -1,0 +1,12 @@
+[package]
+name = "airdroid-core"
+description = "airDroid host side: VM, images, guest memory and the session with Android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+airdroid-proto = { path = "../proto" }
+libc = "0.2"
+
+[dev-dependencies]

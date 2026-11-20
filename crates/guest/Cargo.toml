@@ -1,0 +1,16 @@
+[package]
+name = "airdroid-guest"
+description = "airDroid VM init: starts the Android container and bridges its display to the host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "airdroid-guest"
+path = "src/main.rs"
+
+[dependencies]
+airdroid-proto = { path = "../proto" }
+libc = "0.2"
+wayland-server = "0.31"
+wayland-protocols = { version = "0.32", features = ["server", "staging", "unstable"] }
