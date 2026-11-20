@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/proto", "crates/guest", "crates/core", "crates/devtool"]
+members = ["crates/proto", "crates/guest", "crates/core", "crates/devtool", "apps/airdroid-haiku"]
 
 [workspace.package]
 version = "0.1.0"

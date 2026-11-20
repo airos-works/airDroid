@@ -5,6 +5,7 @@
 
 pub mod compose;
 pub mod guestmem;
+pub mod images;
 pub mod qcow2;
 pub mod session;
 pub mod vm;

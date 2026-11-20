@@ -1,0 +1,20 @@
+[package]
+name = "airdroid-haiku"
+description = "airDroid for air/OS: Android apps in Be API windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "airDroid"
+path = "src/main.rs"
+
+[dependencies]
+airdroid-core = { path = "../../crates/core" }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+cc = "1"

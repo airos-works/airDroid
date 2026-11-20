@@ -1,0 +1,35 @@
+name			airdroid
+version			0.1.0-1
+architecture	x86_64
+summary			"Android apps on air/OS"
+description		"airDroid runs Android apps on air/OS, like Waydroid does on Linux: \
+LineageOS 20 (Waydroid's images, downloaded on first start) runs in a small \
+Linux VM under NVMM, and each Android app gets its own window. Install apps \
+by opening their .apk files; they appear in Deskbar under Applications \
+› Android apps."
+packager		"air/OS <airos@airos.works>"
+vendor			"air/OS"
+copyrights {
+	"2026 airDroid contributors"
+}
+licenses {
+	"GNU GPL v3"
+	"GNU GPL v2"
+}
+urls {
+	"https://github.com/airos-works/airDroid"
+}
+provides {
+	airdroid = 0.1.0
+	app:airDroid = 0.1.0
+}
+requires {
+	haiku >= r1~beta6
+	lib:libstdc++
+	lib:libgcc_s
+	lib:libglib_2.0
+	lib:libslirp
+	lib:libz
+	cmd:curl
+	cmd:unzip
+}

@@ -77,8 +77,11 @@ pub struct VmConfig {
 }
 
 impl VmConfig {
+    /// QEMU's socket for the guest daemon's port. Not every file system
+    /// takes Unix sockets (air/OS's live-session overlay does not): the
+    /// first directory where binding one works.
     pub fn socket(&self) -> PathBuf {
-        self.state_dir.join("airdroid.sock")
+        socket_dir(&self.state_dir).join("airdroid.sock")
     }
     pub fn console_log(&self) -> PathBuf {
         self.state_dir.join("console.log")
@@ -174,4 +177,30 @@ impl VmConfig {
             RamBackend::NvmmMap(_) => Err(std::io::Error::other("NVMM RAM sharing needs air/OS")),
         }
     }
+}
+
+/// The first of `preferred`, /tmp and /var/shared_memory that can hold a
+/// Unix socket (checked once per process).
+pub fn socket_dir(preferred: &Path) -> PathBuf {
+    use std::sync::OnceLock;
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
+        let candidates = [
+            preferred.to_path_buf(),
+            std::env::temp_dir().join(format!("airDroid-{user}")),
+            PathBuf::from(format!("/var/shared_memory/airDroid-{user}")),
+        ];
+        for d in &candidates {
+            let _ = std::fs::create_dir_all(d);
+            let probe = d.join(format!(".probe-{}", std::process::id()));
+            let _ = std::fs::remove_file(&probe);
+            if std::os::unix::net::UnixListener::bind(&probe).is_ok() {
+                let _ = std::fs::remove_file(&probe);
+                return d.clone();
+            }
+        }
+        preferred.to_path_buf()
+    })
+    .clone()
 }

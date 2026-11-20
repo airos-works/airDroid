@@ -1,0 +1,28 @@
+// airDroid's resources: signature, launch behaviour, version, icon and the
+// file type Tracker offers it for (Android packages). Compiled with rc and
+// added with xres by tools/haiku/package.sh.
+
+resource app_signature "application/x-vnd.airos-airDroid";
+
+// One copy runs: Deskbar launchers ("airDroid --launch PACKAGE") and APKs
+// opened from Tracker reach the running one (B_ARGV_RECEIVED,
+// B_REFS_RECEIVED).
+resource app_flags B_SINGLE_LAUNCH;
+
+resource app_version {
+	major = 0,
+	middle = 1,
+	minor = 0,
+	variety = B_APPV_DEVELOPMENT,
+	internal = 1,
+	short_info = "airDroid 0.1.0",
+	long_info = "airDroid: Android apps on air/OS (Waydroid's Android images in a Linux VM)."
+};
+
+resource vector_icon {
+	import "airDroid.hvif"
+};
+
+resource file_types message {
+	"types" = "application/vnd.android.package-archive"
+};
