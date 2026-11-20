@@ -253,6 +253,17 @@ pub enum ToHost {
     AudioClose {
         stream: u32,
     },
+    /// Android records (a PulseAudio record stream): the host captures its
+    /// microphone as PCM s16le interleaved at this rate and channel count
+    /// and sends it as ToGuest::AudioIn (silence when it has no input).
+    AudioInOpen {
+        stream: u32,
+        rate: u32,
+        channels: u32,
+    },
+    AudioInClose {
+        stream: u32,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,6 +406,11 @@ pub enum ToGuest {
     AudioCredit {
         stream: u32,
         bytes: u64,
+    },
+    /// Captured audio for a record stream (see ToHost::AudioInOpen).
+    AudioIn {
+        stream: u32,
+        data: Vec<u8>,
     },
     Shutdown,
 }

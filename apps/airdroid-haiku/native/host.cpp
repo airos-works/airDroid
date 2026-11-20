@@ -28,6 +28,8 @@
 #include <ListView.h>
 #include <Menu.h>
 #include <MenuBar.h>
+#include <MediaRecorder.h>
+#include <MediaRoster.h>
 #include <MenuItem.h>
 #include <Message.h>
 #include <MessageRunner.h>
@@ -1353,6 +1355,169 @@ ad_audio_close(uint32 id)
 	a->player->Stop();
 	delete a->player;
 	delete a;
+}
+
+
+// #pragma mark - microphone
+
+
+/*! A record stream of Android's: the system's audio input through a
+	BMediaRecorder, converted to s16 interleaved at the stream's rate and
+	channel count (linear interpolation), queued for ad_mic_take(). */
+struct MicIn {
+	BMediaRecorder*		recorder;
+	uint32				rate;
+	uint32				channels;
+	std::mutex			lock;
+	std::vector<int16>	queue;
+	std::vector<float>	previous;	// the last source frame, per output channel
+	double				phase;		// next output's position after it, in frames
+
+	MicIn() : recorder(NULL), rate(0), channels(0), phase(0) {}
+};
+
+static std::mutex sMicLock;
+static std::map<uint32, MicIn*> sMics;
+
+
+static inline float
+MicSample(const uint8* frame, uint32 format, uint32 index)
+{
+	switch (format) {
+		case media_raw_audio_format::B_AUDIO_FLOAT:
+			return ((const float*)frame)[index];
+		case media_raw_audio_format::B_AUDIO_INT:
+			return ((const int32*)frame)[index] / 2147483648.0f;
+		case media_raw_audio_format::B_AUDIO_SHORT:
+			return ((const int16*)frame)[index] / 32768.0f;
+		case media_raw_audio_format::B_AUDIO_CHAR:
+			return ((const int8*)frame)[index] / 128.0f;
+		case media_raw_audio_format::B_AUDIO_UCHAR:
+			return (((const uint8*)frame)[index] - 128) / 128.0f;
+	}
+	return 0;
+}
+
+
+static void
+RecordMic(void* cookie, bigtime_t, void* data, size_t size,
+	const media_format& format)
+{
+	MicIn* m = (MicIn*)cookie;
+	const media_raw_audio_format& raw = format.u.raw_audio;
+	uint32 sourceChannels = raw.channel_count;
+	size_t sampleSize = raw.format & media_raw_audio_format::B_AUDIO_SIZE_MASK;
+	if (sourceChannels == 0 || sampleSize == 0 || raw.frame_rate <= 0)
+		return;
+	size_t frameSize = sampleSize * sourceChannels;
+	size_t frames = size / frameSize;
+	double step = raw.frame_rate / m->rate;
+	std::vector<float> current(m->channels);
+
+	std::lock_guard<std::mutex> lock(m->lock);
+	if (m->previous.size() != m->channels)
+		m->previous.assign(m->channels, 0);
+	for (size_t i = 0; i < frames; i++) {
+		const uint8* frame = (const uint8*)data + i * frameSize;
+		for (uint32 c = 0; c < m->channels; c++) {
+			if (m->channels == 1 && sourceChannels > 1) {
+				float sum = 0;
+				for (uint32 k = 0; k < sourceChannels; k++)
+					sum += MicSample(frame, raw.format, k);
+				current[c] = sum / sourceChannels;
+			} else
+				current[c] = MicSample(frame, raw.format, c % sourceChannels);
+		}
+		while (m->phase <= 1.0) {
+			for (uint32 c = 0; c < m->channels; c++) {
+				float v = m->previous[c]
+					+ (current[c] - m->previous[c]) * (float)m->phase;
+				v = std::max(-1.0f, std::min(1.0f, v));
+				m->queue.push_back((int16)(v * 32767));
+			}
+			m->phase += step;
+		}
+		m->phase -= 1.0;
+		m->previous = current;
+	}
+	// at most two seconds waiting (nothing takes it: drop the oldest)
+	size_t limit = (size_t)m->rate * m->channels * 2;
+	if (m->queue.size() > limit)
+		m->queue.erase(m->queue.begin(), m->queue.begin() + (m->queue.size() - limit));
+}
+
+
+/*! Starts capturing for record stream `id`; false without an audio input. */
+int
+ad_mic_open(uint32 id, uint32 rate, uint32 channels)
+{
+	MicIn* m = new MicIn;
+	m->rate = rate;
+	m->channels = channels;
+	m->recorder = new BMediaRecorder("airDroid microphone", B_MEDIA_RAW_AUDIO);
+	media_node input;
+	media_format format;
+	format.type = B_MEDIA_RAW_AUDIO;
+	format.u.raw_audio = media_raw_audio_format::wildcard;
+	status_t status = m->recorder->InitCheck();
+	if (status == B_OK)
+		status = BMediaRoster::Roster()->GetAudioInput(&input);
+	if (status == B_OK)
+		status = m->recorder->SetHooks(RecordMic, NULL, m);
+	if (status == B_OK) {
+		m->recorder->SetAcceptedFormat(format);
+		status = m->recorder->Connect(input, NULL, &format);
+	}
+	if (status == B_OK)
+		status = m->recorder->Start();
+	if (status != B_OK) {
+		fprintf(stderr, "airDroid: no microphone (%s)\n", strerror(status));
+		delete m->recorder;
+		delete m;
+		return 0;
+	}
+	std::lock_guard<std::mutex> lock(sMicLock);
+	sMics[id] = m;
+	return 1;
+}
+
+
+/*! Up to `max` captured samples of stream `id`; returns how many. */
+size_t
+ad_mic_take(uint32 id, int16* out, size_t max)
+{
+	MicIn* m;
+	{
+		std::lock_guard<std::mutex> lock(sMicLock);
+		auto it = sMics.find(id);
+		if (it == sMics.end())
+			return 0;
+		m = it->second;
+	}
+	std::lock_guard<std::mutex> lock(m->lock);
+	size_t n = std::min(max, m->queue.size()) / m->channels * m->channels;
+	memcpy(out, m->queue.data(), n * sizeof(int16));
+	m->queue.erase(m->queue.begin(), m->queue.begin() + n);
+	return n;
+}
+
+
+void
+ad_mic_close(uint32 id)
+{
+	MicIn* m;
+	{
+		std::lock_guard<std::mutex> lock(sMicLock);
+		auto it = sMics.find(id);
+		if (it == sMics.end())
+			return;
+		m = it->second;
+		sMics.erase(it);
+	}
+	m->recorder->Stop();
+	m->recorder->Disconnect();
+	delete m->recorder;
+	delete m;
 }
 
 

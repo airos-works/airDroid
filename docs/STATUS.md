@@ -24,6 +24,12 @@
   auto (virgl when there is a GPU), virgl, none (SwiftShader).
   Verified in the test VM with llvmpipe; not yet on GPU hardware.
 
+* Microphone: Android's record streams (PulseAudio, through Waydroid's
+  audio HAL) get the system's audio input (BMediaRecorder on the default
+  input node, converted to the stream's rate, channels and format), or
+  silence when there is none, so recording apps keep working. Verified on
+  KVM with a test tone (recorded 440 Hz, level as sent) and on the air/OS
+  test VM (no input there: silence); not yet with a real microphone.
 * Multi-window resizing: the edges of an app's (borderless) window resize
   it on the desktop, and Android gives the app's task the new bounds
   (`am task resize`); moving works through Android's own caption bar.

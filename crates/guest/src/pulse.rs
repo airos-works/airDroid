@@ -35,6 +35,7 @@ mod cmd {
     pub const CREATE_PLAYBACK_STREAM: u32 = 3;
     pub const DELETE_PLAYBACK_STREAM: u32 = 4;
     pub const CREATE_RECORD_STREAM: u32 = 5;
+    pub const DELETE_RECORD_STREAM: u32 = 6;
     pub const AUTH: u32 = 8;
     pub const SET_CLIENT_NAME: u32 = 9;
     pub const LOOKUP_SINK: u32 = 10;
@@ -47,12 +48,19 @@ mod cmd {
     pub const FLUSH_PLAYBACK_STREAM: u32 = 42;
     pub const TRIGGER_PLAYBACK_STREAM: u32 = 43;
     pub const SET_PLAYBACK_STREAM_NAME: u32 = 46;
+    pub const SET_RECORD_STREAM_NAME: u32 = 47;
+    pub const GET_RECORD_LATENCY: u32 = 57;
+    pub const CORK_RECORD_STREAM: u32 = 58;
+    pub const FLUSH_RECORD_STREAM: u32 = 59;
     pub const PREBUF_PLAYBACK_STREAM: u32 = 60;
     pub const REQUEST: u32 = 61;
     pub const SET_SINK_INPUT_MUTE: u32 = 69;
     pub const SET_PLAYBACK_STREAM_BUFFER_ATTR: u32 = 72;
+    pub const SET_RECORD_STREAM_BUFFER_ATTR: u32 = 73;
     pub const UPDATE_PLAYBACK_STREAM_SAMPLE_RATE: u32 = 74;
+    pub const UPDATE_RECORD_STREAM_SAMPLE_RATE: u32 = 75;
     pub const UPDATE_PLAYBACK_STREAM_PROPLIST: u32 = 81;
+    pub const UPDATE_RECORD_STREAM_PROPLIST: u32 = 80;
     pub const UPDATE_CLIENT_PROPLIST: u32 = 82;
     pub const REMOVE_PLAYBACK_STREAM_PROPLIST: u32 = 84;
     pub const STARTED: u32 = 86;
@@ -281,6 +289,19 @@ struct Stream {
     drain_tags: Vec<u32>,
 }
 
+/// A record stream: the host's microphone, passed on as it arrives.
+struct Record {
+    client: u32,
+    /// what the client takes (the host sends s16le)
+    format: u8,
+    bytes_per_second: u64,
+    fragsize: u32,
+    maxlength: u32,
+    corked: bool,
+    /// bytes passed to the client
+    sent: u64,
+}
+
 struct Client {
     out: Arc<Mutex<UnixStream>>,
     version: u32,
@@ -290,6 +311,7 @@ struct Client {
 struct State {
     clients: HashMap<u32, Client>,
     streams: HashMap<u32, Stream>,
+    records: HashMap<u32, Record>,
     /// host credit (bytes it can take) per host stream id
     credit: HashMap<u32, u64>,
     next_client: u32,
@@ -378,7 +400,65 @@ impl Pulse {
                 drop(st);
                 return self.create_playback(cid, &out, tag, &mut r);
             }
-            cmd::CREATE_RECORD_STREAM => self.error(&out, tag, ERR_NOENTITY),
+            cmd::CREATE_RECORD_STREAM => {
+                drop(st);
+                self.create_record(cid, &out, tag, &mut r)?;
+            }
+            cmd::DELETE_RECORD_STREAM => {
+                let idx = r.u32()?;
+                if st.records.remove(&idx).is_some() {
+                    self.link.send(&ToHost::AudioInClose { stream: idx });
+                }
+                self.reply_ok(&out, tag);
+            }
+            cmd::CORK_RECORD_STREAM => {
+                let idx = r.u32()?;
+                let corked = r.boolean()?;
+                if let Some(rec) = st.records.get_mut(&idx) {
+                    rec.corked = corked;
+                }
+                self.reply_ok(&out, tag);
+            }
+            cmd::GET_RECORD_LATENCY => {
+                let idx = r.u32()?;
+                let (sec, usec) = r.timeval()?;
+                let Some(rec) = st.records.get(&idx) else {
+                    self.error(&out, tag, ERR_NOENTITY);
+                    return Ok(());
+                };
+                let mut t = Tags::command(cmd::REPLY, tag);
+                t.usec(0); // monitor latency
+                t.usec(rec.fragsize as u64 * 1_000_000 / rec.bytes_per_second.max(1)); // source latency
+                t.boolean(!rec.corked);
+                t.timeval(sec, usec);
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+                t.timeval(now.as_secs() as u32, now.subsec_micros());
+                t.s64(rec.sent as i64); // write index
+                t.s64(rec.sent as i64); // read index: all passed on
+                self.send(&out, t);
+            }
+            cmd::SET_RECORD_STREAM_BUFFER_ATTR => {
+                let idx = r.u32()?;
+                let maxlength = r.u32()?;
+                let fragsize = r.u32()?;
+                let Some(rec) = st.records.get_mut(&idx) else {
+                    self.error(&out, tag, ERR_NOENTITY);
+                    return Ok(());
+                };
+                if maxlength != u32::MAX && maxlength != 0 {
+                    rec.maxlength = maxlength;
+                }
+                if fragsize != u32::MAX && fragsize != 0 {
+                    rec.fragsize = fragsize;
+                }
+                let mut t = Tags::command(cmd::REPLY, tag);
+                t.u32(rec.maxlength);
+                t.u32(rec.fragsize);
+                if version >= 13 {
+                    t.usec(rec.fragsize as u64 * 1_000_000 / rec.bytes_per_second.max(1));
+                }
+                self.send(&out, t);
+            }
             cmd::DELETE_PLAYBACK_STREAM => {
                 let idx = r.u32()?;
                 if let Some(s) = st.streams.remove(&idx) {
@@ -479,7 +559,11 @@ impl Pulse {
             | cmd::REMOVE_PLAYBACK_STREAM_PROPLIST
             | cmd::SET_SINK_INPUT_VOLUME
             | cmd::SET_SINK_INPUT_MUTE
-            | cmd::UPDATE_PLAYBACK_STREAM_SAMPLE_RATE => self.reply_ok(&out, tag),
+            | cmd::UPDATE_PLAYBACK_STREAM_SAMPLE_RATE
+            | cmd::FLUSH_RECORD_STREAM
+            | cmd::SET_RECORD_STREAM_NAME
+            | cmd::UPDATE_RECORD_STREAM_PROPLIST
+            | cmd::UPDATE_RECORD_STREAM_SAMPLE_RATE => self.reply_ok(&out, tag),
             other => {
                 logf!("pulse: unsupported command {other}");
                 self.error(&out, tag, ERR_NOTSUPPORTED);
@@ -602,6 +686,125 @@ impl Pulse {
         self.send(out, t);
         logf!("pulse: playback stream {idx}: {rate} Hz, {channels} channels");
         Ok(())
+    }
+
+    fn create_record(&self, cid: u32, out: &Client, tag: u32, r: &mut TagReader) -> io::Result<()> {
+        let version = out.version;
+        if version < 13 {
+            r.string()?;
+        }
+        let (format, channels, rate) = r.sample_spec()?;
+        let map = r.channel_map()?;
+        let _source_index = r.u32()?;
+        let _source_name = r.string()?;
+        let maxlength = r.u32()?;
+        let corked = r.boolean()?;
+        let fragsize = r.u32()?;
+        if version >= 12 {
+            for _ in 0..7 {
+                r.boolean()?;
+            }
+        }
+        if version >= 13 {
+            r.boolean()?;
+            r.boolean()?;
+            r.proplist()?;
+            r.u32()?; // direct_on_input
+        }
+        if version >= 14 {
+            r.boolean()?;
+        }
+        if version >= 15 {
+            r.boolean()?;
+            r.boolean()?;
+        }
+        if version >= 22 {
+            let n = r.u8()?;
+            for _ in 0..n {
+                r.format_info()?;
+            }
+            r.cvolume()?;
+            for _ in 0..5 {
+                r.boolean()?;
+            }
+        }
+        // the host captures s16le; S32LE and float are converted here
+        if ![SAMPLE_S16LE, SAMPLE_S32LE, SAMPLE_FLOAT32LE].contains(&format) || channels == 0 || channels > 8 || rate == 0 {
+            logf!("pulse: record stream refused: format {format}, {channels} channels, {rate} Hz");
+            self.error(out, tag, ERR_NOTSUPPORTED);
+            return Ok(());
+        }
+        let sample = if format == SAMPLE_S16LE { 2 } else { 4 };
+        let bps = rate as u64 * channels as u64 * sample;
+        let frame_size = channels as u32 * sample as u32;
+        let fragsize = if fragsize == u32::MAX || fragsize == 0 { (bps / 50) as u32 } else { fragsize } / frame_size * frame_size;
+        let fragsize = fragsize.max(frame_size);
+        let maxlength = if maxlength == u32::MAX || maxlength == 0 { (bps * 2) as u32 } else { maxlength };
+
+        let mut st = self.state.lock().unwrap();
+        st.next_stream += 1;
+        let idx = st.next_stream;
+        st.records.insert(idx, Record { client: cid, format, bytes_per_second: bps, fragsize, maxlength, corked, sent: 0 });
+        drop(st);
+        self.link.send(&ToHost::AudioInOpen { stream: idx, rate, channels: channels as u32 });
+
+        let mut t = Tags::command(cmd::REPLY, tag);
+        t.u32(idx); // stream index (the channel its data goes out on)
+        t.u32(idx); // source output index
+        if version >= 9 {
+            t.u32(maxlength);
+            t.u32(fragsize);
+        }
+        if version >= 12 {
+            t.sample_spec(format, channels, rate);
+            t.channel_map(&map);
+            t.u32(0); // source index
+            t.string(Some("airos.mic"));
+            t.boolean(false); // suspended
+        }
+        if version >= 13 {
+            t.usec(fragsize as u64 * 1_000_000 / bps);
+        }
+        if version >= 22 {
+            t.format_info_pcm();
+        }
+        self.send(out, t);
+        logf!("pulse: record stream {idx}: {rate} Hz, {channels} channels");
+        Ok(())
+    }
+
+    /// Captured audio from the host for record stream `stream`.
+    pub fn audio_in(&self, stream: u32, data: &[u8]) {
+        let mut st = self.state.lock().unwrap();
+        let Some(rec) = st.records.get_mut(&stream) else { return };
+        if rec.corked {
+            return;
+        }
+        let converted;
+        let data = match rec.format {
+            SAMPLE_S32LE => {
+                converted = data
+                    .chunks_exact(2)
+                    .flat_map(|s| ((i16::from_le_bytes([s[0], s[1]]) as i32) << 16).to_le_bytes())
+                    .collect::<Vec<u8>>();
+                &converted[..]
+            }
+            SAMPLE_FLOAT32LE => {
+                converted = data
+                    .chunks_exact(2)
+                    .flat_map(|s| (i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0).to_le_bytes())
+                    .collect::<Vec<u8>>();
+                &converted[..]
+            }
+            _ => data,
+        };
+        rec.sent += data.len() as u64;
+        let client = rec.client;
+        let Some(c) = st.clients.get(&client) else { return };
+        let out = c.out.clone();
+        drop(st);
+        // memblocks on the stream's channel, offset 0, seek relative
+        let _ = out.lock().unwrap().write_all(&frame(stream, 0, 0, data));
     }
 
     fn audio(&self, channel: u32, data: &[u8]) {
@@ -750,6 +953,11 @@ impl Pulse {
                 st.credit.remove(&s.host_id);
                 self.link.send(&ToHost::AudioClose { stream: s.host_id });
             }
+        }
+        let gone: Vec<u32> = st.records.iter().filter(|(_, r)| r.client == cid).map(|(k, _)| *k).collect();
+        for k in gone {
+            st.records.remove(&k);
+            self.link.send(&ToHost::AudioInClose { stream: k });
         }
     }
 }

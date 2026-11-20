@@ -127,6 +127,7 @@ fn main() {
 
     let mut pending_done: Vec<(u32, u32)> = Vec::new();
     let mut audio: HashMap<u32, AudioOut> = HashMap::new();
+    let mut mics: HashMap<u32, (u32, u32, u64, Instant)> = HashMap::new();
     let mut last_audio = Instant::now();
     let mut next_vsync = Instant::now();
     loop {
@@ -226,12 +227,36 @@ fn main() {
                         eprintln!("dev: audio {stream} closed after {} bytes", a.played + a.buffered);
                     }
                 }
+                ToHost::AudioInOpen { stream, rate, channels } => {
+                    eprintln!("dev: microphone {stream} open: {rate} Hz x{channels} (a 440 Hz tone)");
+                    mics.insert(stream, (rate, channels, 0u64, Instant::now()));
+                }
+                ToHost::AudioInClose { stream } => {
+                    if let Some((_, _, sent, _)) = mics.remove(&stream) {
+                        eprintln!("dev: microphone {stream} closed after {sent} frames");
+                    }
+                }
                 ToHost::Cursor { .. } => {}
             },
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 eprintln!("dev: VM connection closed");
                 break;
+            }
+        }
+        // the microphone: a 440 Hz tone in real time, 10 ms at a time
+        for (stream, (rate, channels, sent, opened)) in mics.iter_mut() {
+            let due = opened.elapsed().as_micros() as u64 * *rate as u64 / 1_000_000;
+            if due >= *sent + *rate as u64 / 100 {
+                let mut data = Vec::with_capacity(((due - *sent) * *channels as u64 * 2) as usize);
+                for i in *sent..due {
+                    let v = ((i as f64 * 440.0 * std::f64::consts::TAU / *rate as f64).sin() * 8000.0) as i16;
+                    for _ in 0..*channels {
+                        data.extend_from_slice(&v.to_le_bytes());
+                    }
+                }
+                *sent = due;
+                let _ = session.send(&ToGuest::AudioIn { stream: *stream, data });
             }
         }
         let dt = last_audio.elapsed();

@@ -63,8 +63,13 @@ fn launcher_activity(package: &str) -> Result<String, String> {
 ///   would make its windows go black),
 /// * no lock screen, and the notification shade collapsed: in multi-window
 ///   mode neither is shown, but either takes the input focus,
-/// * no on-screen keyboard while there is a hardware one.
+/// * no on-screen keyboard while there is a hardware one,
+/// * in multi-window mode, no crash or "not responding" dialogs: they belong
+///   to no app's task, so (as in Waydroid) no window shows them, but they
+///   would take the input focus.
 pub fn prepare_desktop() {
+    let multi = exec::getprop("persist.waydroid.multi_windows") == "true";
+    let _ = shell_user(&["/system/bin/settings", "put", "global", "hide_error_dialogs", if multi { "1" } else { "0" }]);
     for argv in [
         &["/system/bin/settings", "put", "system", "screen_off_timeout", "2147483647"][..],
         &["/system/bin/svc", "power", "stayon", "true"],

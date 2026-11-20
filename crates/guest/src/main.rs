@@ -133,6 +133,11 @@ fn handle(link: &HostLink, inbox: &Arc<compositor::Inbox>, msg: ToGuest) {
                 p.credit(stream, bytes);
             }
         }
+        ToGuest::AudioIn { stream, data } => {
+            if let Some(p) = PULSE.get() {
+                p.audio_in(stream, &data);
+            }
+        }
         ToGuest::Shutdown => {
             logf!("shutdown requested");
             std::thread::spawn(|| {

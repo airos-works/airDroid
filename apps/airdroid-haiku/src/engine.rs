@@ -98,6 +98,7 @@ pub struct Engine {
     cancel_setup: Arc<AtomicBool>,
     /// open audio streams (the host plays them; credits go back)
     audio: Vec<u32>,
+    mics: HashMap<u32, Mic>,
     /// `airdroid` commands waiting for a guest answer, by request id
     waiters: HashMap<u32, UnixStream>,
     restart_after_stop: bool,
@@ -131,6 +132,7 @@ impl Engine {
             epoch: Instant::now(),
             cancel_setup: Arc::new(AtomicBool::new(false)),
             audio: Vec::new(),
+            mics: HashMap::new(),
             waiters: HashMap::new(),
             restart_after_stop: false,
         }
@@ -155,7 +157,7 @@ impl Engine {
         loop {
             let timeout = self.next_vsync.saturating_duration_since(Instant::now());
             // audio credits need a short tick while streams are open
-            let idle = if self.audio.is_empty() { Duration::from_millis(250) } else { Duration::from_millis(10) };
+            let idle = if self.audio.is_empty() && self.mics.is_empty() { Duration::from_millis(250) } else { Duration::from_millis(10) };
             let msg = if self.frames_done.is_empty() { rx.recv_timeout(idle) } else { rx.recv_timeout(timeout.min(idle)) };
             match msg {
                 Ok(Msg::Host(ev)) => self.host_event(ev),
@@ -170,6 +172,7 @@ impl Engine {
             }
             self.vsync();
             self.audio_credits();
+            self.microphones();
             if self.quitting && self.child.is_none() {
                 break;
             }
@@ -503,6 +506,11 @@ impl Engine {
         }
         self.windows.clear();
         self.frames_done.clear();
+        for (stream, m) in self.mics.drain() {
+            if m.native {
+                host::mic_close(stream);
+            }
+        }
         for stream in self.audio.drain(..) {
             host::audio_close(stream);
         }
@@ -760,6 +768,18 @@ impl Engine {
                 host::audio_close(stream);
                 self.audio.retain(|s| *s != stream);
             }
+            ToHost::AudioInOpen { stream, rate, channels } => {
+                let native = host::mic_open(stream, rate, channels);
+                debug_log(&format!("microphone {stream}: {rate} Hz x{channels}, {}", if native { "audio input" } else { "no input: silence" }));
+                self.mics.insert(stream, Mic { rate, channels, native, opened: Instant::now(), sent_frames: 0, got_data: false });
+            }
+            ToHost::AudioInClose { stream } => {
+                if let Some(m) = self.mics.remove(&stream) {
+                    if m.native {
+                        host::mic_close(stream);
+                    }
+                }
+            }
         }
     }
 
@@ -783,6 +803,35 @@ impl Engine {
             }
         } else {
             self.frames_done.clear();
+        }
+    }
+
+    /// Captured audio to Android's record streams: the audio input's, or
+    /// silence in real time when there is none (or it stays quiet: an
+    /// input node that delivers nothing), so recording apps keep running.
+    fn microphones(&mut self) {
+        let Some(s) = &self.session else { return };
+        for (&stream, m) in self.mics.iter_mut() {
+            let due = m.opened.elapsed().as_micros() as u64 * m.rate as u64 / 1_000_000;
+            let data = if m.native {
+                let data = host::mic_take(stream);
+                if !data.is_empty() {
+                    m.got_data = true;
+                } else if !m.got_data && m.opened.elapsed() > Duration::from_secs(1) {
+                    debug_log(&format!("microphone {stream}: the audio input sends nothing; silence instead"));
+                    host::mic_close(stream);
+                    m.native = false;
+                }
+                data
+            } else if due >= m.sent_frames + m.rate as u64 / 100 {
+                vec![0u8; ((due - m.sent_frames) * m.channels as u64 * 2) as usize]
+            } else {
+                Vec::new()
+            };
+            if !data.is_empty() {
+                m.sent_frames += data.len() as u64 / (m.channels as u64 * 2);
+                let _ = s.send(&ToGuest::AudioIn { stream, data });
+            }
         }
     }
 
@@ -977,6 +1026,23 @@ impl Engine {
             _ => {}
         }
     }
+}
+
+fn debug_log(text: &str) {
+    if debug() {
+        eprintln!("airDroid: {text}");
+    }
+}
+
+/// An Android record stream being fed (see Engine::microphones).
+struct Mic {
+    rate: u32,
+    channels: u32,
+    /// the system's audio input (else silence)
+    native: bool,
+    opened: Instant,
+    sent_frames: u64,
+    got_data: bool,
 }
 
 fn debug() -> bool {

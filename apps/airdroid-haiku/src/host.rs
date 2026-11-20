@@ -105,6 +105,9 @@ mod ffi {
         pub fn ad_audio_write(id: u32, data: *const u8, len: usize);
         pub fn ad_audio_take_consumed(id: u32) -> u64;
         pub fn ad_audio_close(id: u32);
+        pub fn ad_mic_open(id: u32, rate: u32, channels: u32) -> i32;
+        pub fn ad_mic_take(id: u32, out: *mut i16, max: usize) -> usize;
+        pub fn ad_mic_close(id: u32);
         pub fn ad_notify(
             id: u32,
             app: *const libc::c_char,
@@ -243,6 +246,19 @@ mod imp {
     pub fn audio_close(id: u32) {
         unsafe { ffi::ad_audio_close(id) }
     }
+    /// The system's audio input for a record stream; false without one.
+    pub fn mic_open(id: u32, rate: u32, channels: u32) -> bool {
+        unsafe { ffi::ad_mic_open(id, rate, channels) != 0 }
+    }
+    /// Captured samples (s16) waiting, as little-endian bytes.
+    pub fn mic_take(id: u32) -> Vec<u8> {
+        let mut buf = vec![0i16; 16384];
+        let n = unsafe { ffi::ad_mic_take(id, buf.as_mut_ptr(), buf.len()) };
+        buf[..n].iter().flat_map(|s| s.to_le_bytes()).collect()
+    }
+    pub fn mic_close(id: u32) {
+        unsafe { ffi::ad_mic_close(id) }
+    }
     pub fn notify(id: u32, app: &str, package: &str, title: &str, body: &str, image: Option<&airdroid_core::proto::NotifyImage>, png: Option<&[u8]>) {
         let (ip, w, h, rs, a) = match image {
             Some(i) if i.data.len() >= (i.rowstride as usize) * (i.height as usize) => (i.data.as_ptr(), i.width as i32, i.height as i32, i.rowstride as i32, i.has_alpha as i32),
@@ -307,6 +323,13 @@ mod imp {
         0
     }
     pub fn audio_close(id: u32) {}
+    pub fn mic_open(id: u32, rate: u32, channels: u32) -> bool {
+        false
+    }
+    pub fn mic_take(id: u32) -> Vec<u8> {
+        Vec::new()
+    }
+    pub fn mic_close(id: u32) {}
     pub fn notify(id: u32, app: &str, package: &str, title: &str, body: &str, image: Option<&airdroid_core::proto::NotifyImage>, png: Option<&[u8]>) {
         eprintln!("notification {id} {app}: {title}: {body}");
     }
