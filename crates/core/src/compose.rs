@@ -140,7 +140,28 @@ impl Canvas {
     /// Paints `layers` (bottom first) over the whole canvas; returns the
     /// area painted.
     pub fn compose(&mut self, layers: &[Layer], buffers: &HashMap<u32, Buffer>) -> Rect {
+        self.compose_at(layers, buffers, 0, 0)
+    }
+
+    /// Like `compose`, for the part of the window whose top left corner is
+    /// at (`ox`, `oy`) in window coordinates (the canvas is that part).
+    pub fn compose_at(&mut self, layers: &[Layer], buffers: &HashMap<u32, Buffer>, ox: i32, oy: i32) -> Rect {
         let full = Rect::new(0, 0, self.width as i32, self.height as i32);
+        let shifted: Vec<Layer>;
+        let layers = if ox != 0 || oy != 0 {
+            shifted = layers
+                .iter()
+                .map(|l| {
+                    let mut l = l.clone();
+                    l.dst.x -= ox;
+                    l.dst.y -= oy;
+                    l
+                })
+                .collect();
+            &shifted[..]
+        } else {
+            layers
+        };
         for p in self.pixels.iter_mut() {
             *p = 0xff00_0000;
         }
@@ -237,5 +258,35 @@ impl Canvas {
 impl Default for Canvas {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The part of a window Android draws in: the union of its layers, leaving
+/// out fully transparent solid ones (the hwcomposer's window background in
+/// multi-window mode is the whole display, transparent, with the app's
+/// task somewhere in it). None if nothing is visible.
+pub fn content_bounds(layers: &[Layer]) -> Option<Rect> {
+    let mut r = Rect::default();
+    for l in layers {
+        if l.buffer == u32::MAX && (l.src.x as u32) >> 24 == 0 {
+            continue;
+        }
+        r = r.union(&l.dst);
+    }
+    (!r.is_empty()).then_some(r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounds_skip_transparent_background() {
+        let bg = Layer { buffer: u32::MAX, src: Rect::new(0, 0, 0, 0), dst: Rect::new(0, 0, 1280, 800), opaque: false };
+        let app = Layer { buffer: 3, src: Rect::new(0, 0, 360, 640), dst: Rect::new(458, 62, 364, 654), opaque: true };
+        assert_eq!(content_bounds(&[bg.clone(), app.clone()]), Some(Rect::new(458, 62, 364, 654)));
+        assert_eq!(content_bounds(&[bg]), None);
+        let opaque_bg = Layer { buffer: u32::MAX, src: Rect::new(0xff000000u32 as i32, 0, 0, 0), dst: Rect::new(0, 0, 1280, 800), opaque: true };
+        assert_eq!(content_bounds(&[opaque_bg, app]), Some(Rect::new(0, 0, 1280, 800)));
     }
 }

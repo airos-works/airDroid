@@ -5,7 +5,8 @@ use crate::host::{self, action, kind, Event};
 use crate::keys;
 use crate::paths::{Paths, Resources};
 use crate::settings::Settings;
-use airdroid_core::compose::{Buffer, Canvas};
+use airdroid_core::compose::{content_bounds, Buffer, Canvas};
+use airdroid_core::proto::Rect;
 use airdroid_core::guestmem::GuestMem;
 use airdroid_core::images;
 use airdroid_core::proto::{AppInfo, BootStage, ToGuest, ToHost, TouchKind};
@@ -47,9 +48,20 @@ enum Pending {
 struct Win {
     canvas: Canvas,
     title: String,
-    size: (u32, u32),
+    /// The part of the Android window shown (multi-window: the app's task
+    /// inside a display-sized surface); None until something is visible,
+    /// and the BWindow opens then.
+    shown: Option<Rect>,
     buttons: i32,
     touching: bool,
+}
+
+impl Win {
+    /// Host window coordinates to Android window coordinates.
+    fn to_android(&self, x: f32, y: f32) -> (f32, f32) {
+        let (ox, oy) = self.shown.map_or((0, 0), |r| (r.x, r.y));
+        (x + ox as f32, y + oy as f32)
+    }
 }
 
 pub struct Engine {
@@ -405,10 +417,9 @@ impl Engine {
             ToHost::BufferDestroy { id } => {
                 self.buffers.remove(&id);
             }
-            ToHost::WindowNew { id, title, app_id, width, height } => {
+            ToHost::WindowNew { id, title, app_id, .. } => {
                 let title = window_title(&title, &app_id, &self.apps);
-                host::window_open(id, &title, width.max(64), height.max(64));
-                self.windows.insert(id, Win { canvas: Canvas::new(), title, size: (width, height), buttons: 0, touching: false });
+                self.windows.insert(id, Win { canvas: Canvas::new(), title, shown: None, buttons: 0, touching: false });
             }
             ToHost::WindowUpdate { id, title, app_id, .. } => {
                 let t = window_title(&title, &app_id, &self.apps);
@@ -424,14 +435,29 @@ impl Engine {
                 self.windows.remove(&id);
             }
             ToHost::Frame { window, serial, width, height, layers, .. } => {
+                let multi = self.settings.multi_windows;
                 if let Some(w) = self.windows.get_mut(&window) {
-                    if w.size != (width, height) {
-                        w.size = (width, height);
-                        host::window_resize(window, width, height);
+                    let full = Rect::new(0, 0, width as i32, height as i32);
+                    // multi-window: just the app's task, where Android put it
+                    // (its display is the screen, so that is screen coordinates)
+                    let area = if multi { content_bounds(&layers).map(|b| b.intersect(&full)) } else { Some(full) };
+                    if let Some(area) = area.filter(|a| !a.is_empty()) {
+                        match w.shown {
+                            None => host::window_open(window, &w.title, multi.then_some((area.x, area.y)), area.w as u32, area.h as u32, multi),
+                            Some(old) => {
+                                if (old.w, old.h) != (area.w, area.h) {
+                                    host::window_resize(window, area.w as u32, area.h as u32);
+                                }
+                                if multi && (old.x, old.y) != (area.x, area.y) {
+                                    host::window_move(window, area.x, area.y);
+                                }
+                            }
+                        }
+                        w.shown = Some(area);
+                        w.canvas.resize(area.w as u32, area.h as u32);
+                        w.canvas.compose_at(&layers, &self.buffers, area.x, area.y);
+                        host::window_present(window, &w.canvas.pixels, area.w as u32, area.h as u32);
                     }
-                    w.canvas.resize(width, height);
-                    w.canvas.compose(&layers, &self.buffers);
-                    host::window_present(window, &w.canvas.pixels, width, height);
                 }
                 self.frames_done.push((window, serial));
             }
@@ -523,12 +549,13 @@ impl Engine {
             kind::MOUSE_MOVED => {
                 let touch = self.settings.mouse_as_touch;
                 if let Some(w) = self.windows.get(&win) {
+                    let (x, y) = w.to_android(ev.x, ev.y);
                     if touch {
                         if w.touching {
-                            self.send(ToGuest::Touch { window: win, id: 0, kind: TouchKind::Motion, x: ev.x, y: ev.y });
+                            self.send(ToGuest::Touch { window: win, id: 0, kind: TouchKind::Motion, x, y });
                         }
                     } else {
-                        self.send(ToGuest::PointerMotion { window: win, x: ev.x, y: ev.y });
+                        self.send(ToGuest::PointerMotion { window: win, x, y });
                     }
                 }
             }
@@ -536,18 +563,19 @@ impl Engine {
                 let touch = self.settings.mouse_as_touch;
                 let Some(w) = self.windows.get_mut(&win) else { return };
                 let old = w.buttons;
-                let new = if ev.kind == kind::MOUSE_DOWN { ev.buttons } else { ev.buttons };
+                let new = ev.buttons;
                 w.buttons = new;
+                let (x, y) = w.to_android(ev.x, ev.y);
                 if touch {
                     let down = new & 1 != 0;
                     if down != w.touching {
                         w.touching = down;
                         let k = if down { TouchKind::Down } else { TouchKind::Up };
-                        self.send(ToGuest::Touch { window: win, id: 0, kind: k, x: ev.x, y: ev.y });
+                        self.send(ToGuest::Touch { window: win, id: 0, kind: k, x, y });
                     }
                     return;
                 }
-                self.send(ToGuest::PointerMotion { window: win, x: ev.x, y: ev.y });
+                self.send(ToGuest::PointerMotion { window: win, x, y });
                 // B_PRIMARY/SECONDARY/TERTIARY_MOUSE_BUTTON -> BTN_LEFT/RIGHT/MIDDLE
                 for (bit, btn) in [(1, 0x110), (2, 0x111), (4, 0x112)] {
                     if (old ^ new) & bit != 0 {
@@ -585,7 +613,8 @@ impl Engine {
             kind::WINDOW_RESIZED => {
                 let (w, h) = (ev.x as u32, ev.y as u32);
                 if let Some(win_state) = self.windows.get(&win) {
-                    if win_state.size != (w, h) && !self.settings.multi_windows {
+                    let shown = win_state.shown.map(|r| (r.w as u32, r.h as u32));
+                    if shown.is_some() && shown != Some((w, h)) && !self.settings.multi_windows {
                         self.send(ToGuest::WindowResize { id: win, width: w, height: h });
                     }
                 }

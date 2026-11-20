@@ -39,6 +39,14 @@ fn sh(argv: &[&str]) -> Result<String, String> {
     exec::android_output(argv).map_err(|e| e.to_string())
 }
 
+/// As Android's shell user: `am` answers root with a silent -1.
+fn shell_user(argv: &[&str]) -> Result<String, String> {
+    if !exec::android_running() {
+        return Err("Android is not running".into());
+    }
+    exec::android_output_as(argv, Some(exec::AID_SHELL)).map_err(|e| e.to_string())
+}
+
 /// `package/class` of the app's launcher activity.
 fn launcher_activity(package: &str) -> Result<String, String> {
     let out = sh(&["/system/bin/cmd", "package", "resolve-activity", "--brief", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", package])?;
@@ -66,11 +74,11 @@ fn run(link: &HostLink, action: Action) -> Result<String, String> {
         Action::Launch(package) => {
             let activity = launcher_activity(&package)?;
             let _ = exec::setprop("waydroid.active_apps", &package);
-            sh(&["/system/bin/am", "start", "-n", &activity, "-f", "0x10000000"])
+            shell_user(&["/system/bin/am", "start", "-n", &activity, "-f", "0x10000000"])
         }
         Action::FullUi => {
             let _ = exec::setprop("waydroid.active_apps", "Waydroid");
-            sh(&["/system/bin/am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME"])
+            shell_user(&["/system/bin/am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME"])
         }
         Action::Intent(action, uri) => {
             let mut argv = vec!["/system/bin/am", "start", "-a", action.as_str(), "-f", "0x10000000"];
@@ -78,7 +86,7 @@ fn run(link: &HostLink, action: Action) -> Result<String, String> {
                 argv.push("-d");
                 argv.push(uri.as_str());
             }
-            sh(&argv)
+            shell_user(&argv)
         }
         Action::SetProp(k, v) => exec::setprop(&k, &v).map(|_| String::new()).map_err(|e| e.to_string()),
         Action::List => {

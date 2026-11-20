@@ -22,6 +22,14 @@ pub fn android_running() -> bool {
 /// container's PID namespace first (setns(CLONE_NEWPID) only affects
 /// children of the calling thread, and a thread that did it cannot leave).
 fn command(argv: &[String], android: bool) -> io::Result<Command> {
+    command_as(argv, android, None)
+}
+
+/// Android's shell user (AID_SHELL): what `adb shell` runs as. The activity
+/// manager's shell commands refuse root callers without a word.
+pub const AID_SHELL: u32 = 2000;
+
+fn command_as(argv: &[String], android: bool, uid: Option<u32>) -> io::Result<Command> {
     if argv.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty command"));
     }
@@ -47,7 +55,20 @@ fn command(argv: &[String], android: bool) -> io::Result<Command> {
             cmd.env(k, v);
         }
         unsafe {
-            cmd.pre_exec(move || container::enter_namespaces_pre_exec(pid));
+            cmd.pre_exec(move || {
+                container::enter_namespaces_pre_exec(pid)?;
+                if let Some(uid) = uid {
+                    // AID_SHELL's groups as adb shell has them: log, inet, sdcard_rw, ...
+                    let groups: [libc::gid_t; 6] = [1004, 1007, 1011, 1015, 3003, 3009];
+                    if libc::setgroups(groups.len(), groups.as_ptr()) != 0
+                        || libc::setgid(uid) != 0
+                        || libc::setuid(uid) != 0
+                    {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
         }
     }
     Ok(cmd)
@@ -56,10 +77,10 @@ fn command(argv: &[String], android: bool) -> io::Result<Command> {
 /// Spawns the command with piped stdio. For Android commands a throwaway
 /// thread joins the container's PID namespace and only spawns: a thread
 /// that did setns(CLONE_NEWPID) cannot create threads any more.
-fn spawn_piped(argv: &[String], android: bool) -> io::Result<Child> {
+fn spawn_piped(argv: &[String], android: bool, uid: Option<u32>) -> io::Result<Child> {
     let argv = argv.to_vec();
     std::thread::spawn(move || -> io::Result<Child> {
-        let mut cmd = command(&argv, android)?;
+        let mut cmd = command_as(&argv, android, uid)?;
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         sys::spawn(&mut cmd)
     })
@@ -69,10 +90,15 @@ fn spawn_piped(argv: &[String], android: bool) -> io::Result<Child> {
 
 /// Runs a command to completion; returns (exit code, stdout, stderr).
 pub fn run(argv: &[&str], android: bool, stdin: &[u8]) -> io::Result<(i32, Vec<u8>, Vec<u8>)> {
+    run_as(argv, android, None, stdin)
+}
+
+/// Like `run`, as user `uid` (Android commands only).
+pub fn run_as(argv: &[&str], android: bool, uid: Option<u32>, stdin: &[u8]) -> io::Result<(i32, Vec<u8>, Vec<u8>)> {
     let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
     let stdin = stdin.to_vec();
     (move || -> io::Result<(i32, Vec<u8>, Vec<u8>)> {
-        let mut child = spawn_piped(&argv, android)?;
+        let mut child = spawn_piped(&argv, android, uid)?;
         let mut sin = child.stdin.take().unwrap();
         let w = std::thread::spawn(move || {
             let _ = sin.write_all(&stdin);
@@ -94,7 +120,11 @@ pub fn run(argv: &[&str], android: bool, stdin: &[u8]) -> io::Result<(i32, Vec<u
 
 /// Convenience: stdout of an Android command as a trimmed string.
 pub fn android_output(argv: &[&str]) -> io::Result<String> {
-    let (code, out, err) = run(argv, true, &[])?;
+    android_output_as(argv, None)
+}
+
+pub fn android_output_as(argv: &[&str], uid: Option<u32>) -> io::Result<String> {
+    let (code, out, err) = run_as(argv, true, uid, &[])?;
     if code != 0 {
         return Err(io::Error::other(format!(
             "{} exited {code}: {}",
@@ -117,7 +147,7 @@ pub fn setprop(key: &str, value: &str) -> io::Result<()> {
 pub fn spawn_for_host(link: HostLink, req: u32, argv: Vec<String>, android: bool, stdin: Vec<u8>) {
     std::thread::spawn(move || {
         let result = (|| -> io::Result<i32> {
-            let mut child = spawn_piped(&argv, android)?;
+            let mut child = spawn_piped(&argv, android, None)?;
             let mut sin = child.stdin.take().unwrap();
             std::thread::spawn(move || {
                 let _ = sin.write_all(&stdin);

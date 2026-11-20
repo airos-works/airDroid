@@ -206,6 +206,12 @@ fn boot(link: &HostLink, cfg: &container::Config, inbox: &Arc<compositor::Inbox>
         }
     }
     let props = container::make_props(cfg, &extra);
+    if let Err(e) = container::set_persistent_props(&[(
+        "persist.waydroid.multi_windows",
+        if cfg.multi_windows { "true" } else { "false" },
+    )]) {
+        logf!("cannot set persistent properties: {e}");
+    }
     container::prepare_rootfs(cfg, &props)?;
 
     // the compositor must listen before the hwcomposer starts
@@ -249,7 +255,7 @@ fn boot(link: &HostLink, cfg: &container::Config, inbox: &Arc<compositor::Inbox>
                     return;
                 }
                 if exec::getprop("sys.boot_completed") == "1" {
-                    let _ = exec::setprop("persist.waydroid.multi_windows", if multi { "true" } else { "false" });
+                    let _ = multi;
                     status(&link, BootStage::Booted, &format!("Android booted in {:.1} s", start.elapsed().as_secs_f32()));
                     apps::spawn(link.clone(), 0, apps::Action::List);
                     apps::watch_packages(link.clone());

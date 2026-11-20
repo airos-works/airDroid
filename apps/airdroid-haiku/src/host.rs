@@ -75,7 +75,8 @@ mod ffi {
         pub fn ad_host_wake();
         pub fn ad_host_next_event(ev: *mut AdEvent) -> i32;
         pub fn ad_host_event_text(buf: *mut u8, len: usize) -> usize;
-        pub fn ad_window_open(id: u32, title: *const libc::c_char, w: i32, h: i32);
+        pub fn ad_window_open(id: u32, title: *const libc::c_char, x: i32, y: i32, w: i32, h: i32, borderless: i32);
+        pub fn ad_window_move(id: u32, x: i32, y: i32);
         pub fn ad_window_close(id: u32);
         pub fn ad_window_set_title(id: u32, title: *const libc::c_char);
         pub fn ad_window_resize(id: u32, w: i32, h: i32);
@@ -137,8 +138,14 @@ mod imp {
             Some(Event { ev, text })
         }
     }
-    pub fn window_open(id: u32, title: &str, w: u32, h: u32) {
-        unsafe { ffi::ad_window_open(id, c(title).as_ptr(), w as i32, h as i32) }
+    /// `at`: screen position, or None to place it; `borderless`: Android
+    /// draws the caption.
+    pub fn window_open(id: u32, title: &str, at: Option<(i32, i32)>, w: u32, h: u32, borderless: bool) {
+        let (x, y) = at.unwrap_or((-1, -1));
+        unsafe { ffi::ad_window_open(id, c(title).as_ptr(), x, y, w as i32, h as i32, borderless as i32) }
+    }
+    pub fn window_move(id: u32, x: i32, y: i32) {
+        unsafe { ffi::ad_window_move(id, x, y) }
     }
     pub fn window_close(id: u32) {
         unsafe { ffi::ad_window_close(id) }
@@ -226,7 +233,8 @@ mod imp {
         std::thread::sleep(std::time::Duration::from_millis(100));
         None
     }
-    pub fn window_open(id: u32, title: &str, w: u32, h: u32) {}
+    pub fn window_open(id: u32, title: &str, at: Option<(i32, i32)>, w: u32, h: u32, borderless: bool) {}
+    pub fn window_move(id: u32, x: i32, y: i32) {}
     pub fn window_close(id: u32) {}
     pub fn window_set_title(id: u32, title: &str) {}
     pub fn window_resize(id: u32, w: u32, h: u32) {}

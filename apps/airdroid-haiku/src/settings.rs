@@ -25,7 +25,7 @@ impl Default for Settings {
     fn default() -> Self {
         let cpus = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
         Settings {
-            multi_windows: false,
+            multi_windows: true,
             width: 1280,
             height: 800,
             dpi: 0,

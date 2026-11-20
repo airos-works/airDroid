@@ -431,3 +431,87 @@ pub fn hold_input_fifos() {
         })
         .expect("input-fifos thread");
 }
+
+/// Sets persistent properties in Android's store before it boots
+/// (/data/property/persistent_properties: a protobuf PersistentProperties,
+/// field 1 repeated { 1: name, 2: value }). Android loads it before the
+/// hwcomposer starts, so a value set with setprop after boot would only
+/// count from the next boot on.
+pub fn set_persistent_props(props: &[(&str, &str)]) -> io::Result<()> {
+    let path = format!("{DATA_DISK}/data/property/persistent_properties");
+    let old = std::fs::read(&path).unwrap_or_default();
+    let mut records: Vec<(String, String)> = Vec::new();
+    let mut i = 0;
+    let varint = |b: &[u8], i: &mut usize| -> Option<u64> {
+        let mut v = 0u64;
+        for shift in (0..64).step_by(7) {
+            let byte = *b.get(*i)?;
+            *i += 1;
+            v |= ((byte & 0x7f) as u64) << shift;
+            if byte & 0x80 == 0 {
+                return Some(v);
+            }
+        }
+        None
+    };
+    while i < old.len() {
+        let Some(key) = varint(&old, &mut i) else { break };
+        if key != (1 << 3 | 2) {
+            break; // not a record: keep what we parsed
+        }
+        let Some(len) = varint(&old, &mut i) else { break };
+        let end = i + len as usize;
+        if end > old.len() {
+            break;
+        }
+        let rec = &old[i..end];
+        i = end;
+        let (mut j, mut name, mut value) = (0usize, String::new(), String::new());
+        while j < rec.len() {
+            let Some(k) = varint(rec, &mut j) else { break };
+            let Some(l) = varint(rec, &mut j) else { break };
+            let s = String::from_utf8_lossy(&rec[j..(j + l as usize).min(rec.len())]).into_owned();
+            j += l as usize;
+            match k {
+                0x0a => name = s,
+                0x12 => value = s,
+                _ => {}
+            }
+        }
+        records.push((name, value));
+    }
+    for (k, v) in props {
+        records.retain(|(n, _)| n != k);
+        records.push((k.to_string(), v.to_string()));
+    }
+    let put_varint = |out: &mut Vec<u8>, mut v: u64| {
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(b);
+                break;
+            }
+            out.push(b | 0x80);
+        }
+    };
+    let mut out = Vec::new();
+    for (n, v) in &records {
+        let mut rec = Vec::new();
+        rec.push(0x0a);
+        put_varint(&mut rec, n.len() as u64);
+        rec.extend_from_slice(n.as_bytes());
+        rec.push(0x12);
+        put_varint(&mut rec, v.len() as u64);
+        rec.extend_from_slice(v.as_bytes());
+        out.push(0x0a);
+        put_varint(&mut out, rec.len() as u64);
+        out.extend_from_slice(&rec);
+    }
+    let dir = format!("{DATA_DISK}/data/property");
+    std::fs::create_dir_all(&dir)?;
+    let tmp = format!("{path}.airdroid");
+    std::fs::write(&tmp, &out)?;
+    sys::chmod(&tmp, 0o600)?;
+    std::fs::rename(&tmp, &path)
+}

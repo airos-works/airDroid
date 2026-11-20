@@ -343,9 +343,12 @@ private:
 
 class AndroidWindow : public BWindow {
 public:
-	AndroidWindow(BRect frame, const char* title, uint32 id)
+	AndroidWindow(BRect frame, const char* title, uint32 id, bool borderless)
 		:
-		BWindow(frame, title, B_TITLED_WINDOW, B_ASYNCHRONOUS_CONTROLS),
+		BWindow(frame, title,
+			borderless ? B_NO_BORDER_WINDOW_LOOK : B_TITLED_WINDOW_LOOK,
+			B_NORMAL_WINDOW_FEEL, B_ASYNCHRONOUS_CONTROLS
+				| (borderless ? B_NOT_RESIZABLE | B_NOT_ZOOMABLE : 0)),
 		fId(id)
 	{
 		fView = new AndroidView(Bounds(), id);
@@ -488,6 +491,9 @@ public:
 		bar->AddItem(android);
 
 		fStatus = new BStringView("status", "Starting" B_UTF8_ELLIPSIS);
+		// long messages (errors) must not widen the window
+		fStatus->SetTruncation(B_TRUNCATE_END);
+		fStatus->SetExplicitMinSize(BSize(200, B_SIZE_UNSET));
 		fProgress = new BStatusBar("progress");
 		fProgress->SetMaxValue(1.0);
 		fProgress->Hide();
@@ -867,16 +873,22 @@ ad_host_event_text(char* buffer, size_t length)
 }
 
 
+/*! x/y < 0: place the window (cascaded); else at that screen position.
+	borderless: Android draws the window's caption (multi-window mode). */
 void
-ad_window_open(uint32 id, const char* title, int32 width, int32 height)
+ad_window_open(uint32 id, const char* title, int32 x, int32 y, int32 width,
+	int32 height, int borderless)
 {
 	BScreen screen;
 	BRect frame = screen.Frame();
-	// cascade new windows a little
-	float offset = 40 + (id % 8) * 24;
-	BRect r(frame.left + offset, frame.top + offset,
-		frame.left + offset + width - 1, frame.top + offset + height - 1);
-	AndroidWindow* w = new AndroidWindow(r, title, id);
+	if (x < 0 || y < 0) {
+		// cascade new windows a little
+		float offset = 40 + (id % 8) * 24;
+		x = frame.left + offset;
+		y = frame.top + offset;
+	}
+	BRect r(x, y, x + width - 1, y + height - 1);
+	AndroidWindow* w = new AndroidWindow(r, title, id, borderless != 0);
 	{
 		std::lock_guard<std::mutex> lock(sWindowsLock);
 		sWindows[id] = w;
@@ -920,6 +932,17 @@ ad_window_resize(uint32 id, int32 width, int32 height)
 	if (w == NULL)
 		return;
 	w->ResizeTo(width - 1, height - 1);
+	w->Unlock();
+}
+
+
+void
+ad_window_move(uint32 id, int32 x, int32 y)
+{
+	AndroidWindow* w = LockWindow(id);
+	if (w == NULL)
+		return;
+	w->MoveTo(x, y);
 	w->Unlock();
 }
 
