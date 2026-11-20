@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# GPU pieces for airDroid's QEMU on air/OS: libepoxy and virglrenderer,
-# cross-built and installed into the QEMU build's dependency sysroot
-# (build/ARCH/qemu/qemu-deps), so tools/build-qemu.sh (GPU=1) can enable
-# OpenGL and virglrenderer. Run after one plain tools/build-qemu.sh.
-#   ARCH=x86_64 tools/build-gpu.sh
+# GPU pieces for airDroid's QEMU on air/OS: pixman (HaikuPorts), libepoxy
+# and virglrenderer, cross-built and installed into the QEMU build's
+# dependency sysroot (build/ARCH/qemu/qemu-deps), so QEMU can enable OpenGL
+# and virglrenderer. tools/build-qemu.sh runs it between linuxvm's
+# dependency staging and QEMU's configure.
 set -euo pipefail
 . "$(dirname "$0")/common.sh"
 . "${AIROS_SDK:-/data1/airos/sdk}/$ARCH/env.sh"
@@ -14,6 +14,16 @@ deps=$Q/qemu-deps
 sys=$deps/boot/system
 bin=$Q/qemu-bin
 [[ -x $bin/$TRIPLET-gcc ]] || { echo "run tools/build-qemu.sh first" >&2; exit 1; }
+
+# pixman: egl-headless and virtio-gpu draw with it (HaikuPorts' on x86_64)
+if [[ $ARCH == x86_64 && ! -f $sys/develop/lib/pkgconfig/pixman-1.pc && ! -f $sys/lib/pkgconfig/pixman-1.pc ]]; then
+	AIROS_CACHE=${AIROS_CACHE:-/data2/airos/cache} AIROS_SDK=${AIROS_SDK:-/data1/airos/sdk} \
+		python3 "${AIROS_CI:-/mnt/HaikuWork/src/airos-ci}/deps/haikuports.py" stage "$ARCH" "$sys" pixman_devel >/dev/null
+	while read -r p; do
+		mkdir -p "$deps$(dirname "$p")"
+		ln -sfn ../../boot/system "$deps$p"
+	done < <(grep -ho "/packages/[^/]*/.self" "$sys"/develop/lib/pkgconfig/*.pc | sort -u)
+fi
 export PATH=$bin:$PATH
 W=$BUILD/gpu
 mkdir -p "$W"

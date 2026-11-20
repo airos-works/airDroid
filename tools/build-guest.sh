@@ -14,6 +14,6 @@ rm -rf "$tree"
 mkdir -p "$tree/usr/share/airdroid"
 [[ -d $ROOT/guest/overlay ]] && cp -a "$ROOT/guest/overlay" "$tree/usr/share/airdroid/overlay"
 python3 "$ROOT/tools/mkrootfs.py" --arch "$ALPINE_ARCH" --alpine "$ALPINE_VERSION" \
-	--agent "$ROOT/target/$RUST_GUEST_TARGET/release/airdroid-guest" --cache "$CACHE/alpine" \
+	--agent "${CARGO_TARGET_DIR:-$ROOT/target}/$RUST_GUEST_TARGET/release/airdroid-guest" --cache "$CACHE/alpine" \
 	--tree "$tree" --out "$BUILD/initramfs.img" \
 	alpine-baselayout busybox busybox-binsh musl e2fsprogs

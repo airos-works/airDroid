@@ -7,7 +7,5 @@ set -euo pipefail
 here=$(dirname "$0")
 "$here/build-kernel.sh"
 "$here/build-guest.sh"
-GPU=0 "$here/build-qemu.sh"   # stages QEMU's dependencies (GLib, slirp)
-"$here/build-gpu.sh"          # libepoxy, virglrenderer into them
-"$here/build-qemu.sh"         # QEMU with OpenGL and virglrenderer
+"$here/build-qemu.sh"   # QEMU with OpenGL and virglrenderer (build-gpu.sh inside)
 "$here/haiku/package.sh"
