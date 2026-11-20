@@ -5,7 +5,7 @@ use crate::host::{self, action, kind, Event};
 use crate::keys;
 use crate::paths::{Paths, Resources};
 use crate::settings::Settings;
-use airdroid_core::compose::{content_bounds, Buffer, Canvas};
+use airdroid_core::compose::{content_bounds, opaque_bounds, Buffer, Canvas};
 use airdroid_core::proto::Rect;
 use airdroid_core::guestmem::GuestMem;
 use airdroid_core::images;
@@ -51,6 +51,8 @@ enum Pending {
 
 struct Win {
     canvas: Canvas,
+    /// opaque bounds, recomputed when the layer geometry changes
+    crop: Option<(Vec<(Rect, Rect)>, Option<Rect>)>,
     title: String,
     /// The part of the Android window shown (multi-window: the app's task
     /// inside a display-sized surface); None until something is visible,
@@ -566,7 +568,7 @@ impl Engine {
             }
             ToHost::WindowNew { id, title, app_id, .. } => {
                 let title = window_title(&title, &app_id, &self.apps);
-                self.windows.insert(id, Win { canvas: Canvas::new(), title, shown: None, buttons: 0, touching: false });
+                self.windows.insert(id, Win { canvas: Canvas::new(), crop: None, title, shown: None, buttons: 0, touching: false });
             }
             ToHost::WindowUpdate { id, title, app_id, .. } => {
                 let t = window_title(&title, &app_id, &self.apps);
@@ -593,7 +595,22 @@ impl Engine {
                     let full = Rect::new(0, 0, width as i32, height as i32);
                     // multi-window: just the app's task, where Android put it
                     // (its display is the screen, so that is screen coordinates)
-                    let area = if multi { content_bounds(&layers).map(|b| b.intersect(&full)) } else { Some(full) };
+                    let area = if multi {
+                        // the task without its shadow (no per-pixel alpha
+                        // windows here); recomputed when the layers move
+                        let geometry: Vec<(Rect, Rect)> = layers.iter().map(|l| (l.src, l.dst)).collect();
+                        let bounds = match &w.crop {
+                            Some((g, b)) if *g == geometry => *b,
+                            _ => {
+                                let b = opaque_bounds(&layers, &self.buffers).or_else(|| content_bounds(&layers));
+                                w.crop = Some((geometry, b));
+                                b
+                            }
+                        };
+                        bounds.map(|b| b.intersect(&full))
+                    } else {
+                        Some(full)
+                    };
                     if let Some(area) = area.filter(|a| !a.is_empty()) {
                         match w.shown {
                             None => host::window_open(window, &w.title, multi.then_some((area.x, area.y)), area.w as u32, area.h as u32, multi),

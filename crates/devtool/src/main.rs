@@ -174,7 +174,7 @@ fn main() {
                         // like the air/OS app in multi-window mode: only the
                         // task's bounds (AIRDROID_DEV_CROP=1)
                         let crop = std::env::var("AIRDROID_DEV_CROP").is_ok();
-                        match airdroid_core::compose::content_bounds(&layers).filter(|_| crop) {
+                        match airdroid_core::compose::opaque_bounds(&layers, buffers).or_else(|| airdroid_core::compose::content_bounds(&layers)).filter(|_| crop) {
                             Some(b) => {
                                 w.canvas.resize(b.w as u32, b.h as u32);
                                 w.canvas.compose_at(&layers, buffers, b.x, b.y);

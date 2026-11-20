@@ -261,6 +261,78 @@ impl Default for Canvas {
     }
 }
 
+impl Buffer {
+    fn alpha_row(&self, y: u32, x0: u32, x1: u32, row: &mut Vec<u8>) -> Option<Vec<u8>> {
+        if self.format != format::ARGB8888 && self.format != format::ABGR8888 {
+            return None; // no alpha: opaque
+        }
+        let n = ((x1 - x0) * 4) as usize;
+        row.resize(n, 0);
+        self.read(y as usize * self.stride as usize + x0 as usize * 4, &mut row[..n]);
+        Some(row.chunks(4).map(|p| p[3]).collect())
+    }
+
+    /// The part of `src` whose pixels are fully opaque, in buffer
+    /// coordinates (Android's freeform windows carry their shadow as
+    /// translucent margins in the same buffer).
+    pub fn opaque_extent(&self, src: Rect) -> Rect {
+        let src = src.intersect(&Rect::new(0, 0, self.width as i32, self.height as i32));
+        if src.is_empty() || !self.valid || !format::has_alpha(self.format) {
+            return src;
+        }
+        let (x0, x1) = (src.x as u32, (src.x + src.w) as u32);
+        let mut row = Vec::new();
+        let opaque_row = |y: i32, row: &mut Vec<u8>| -> Option<(u32, u32)> {
+            let a = self.alpha_row(y as u32, x0, x1, row)?;
+            let first = a.iter().position(|&v| v == 255)?;
+            let last = a.iter().rposition(|&v| v == 255)?;
+            Some((x0 + first as u32, x0 + last as u32 + 1))
+        };
+        let Some(top) = (src.y..src.y + src.h).find(|&y| opaque_row(y, &mut row).is_some()) else { return src };
+        let bottom = (src.y..src.y + src.h).rev().find(|&y| opaque_row(y, &mut row).is_some()).unwrap_or(top);
+        // left/right from a handful of rows (shadows are uniform)
+        let (mut left, mut right) = (x1, x0);
+        let step = ((bottom - top) / 16).max(1);
+        let mut y = top;
+        while y <= bottom {
+            if let Some((l, r)) = opaque_row(y, &mut row) {
+                left = left.min(l);
+                right = right.max(r);
+            }
+            y += step;
+        }
+        if right <= left {
+            return src;
+        }
+        Rect::new(left as i32, top, (right - left) as i32, bottom - top + 1)
+    }
+}
+
+/// Like `content_bounds`, without the translucent margins (shadows) of the
+/// layers: what a window without per-pixel transparency should show.
+pub fn opaque_bounds(layers: &[Layer], buffers: &HashMap<u32, Buffer>) -> Option<Rect> {
+    let mut r = Rect::default();
+    for l in layers {
+        if l.buffer == u32::MAX {
+            if (l.src.x as u32) >> 24 == 0xff {
+                r = r.union(&l.dst);
+            }
+            continue;
+        }
+        let Some(b) = buffers.get(&l.buffer) else { continue };
+        let e = b.opaque_extent(l.src);
+        if e.is_empty() || l.src.w <= 0 || l.src.h <= 0 {
+            continue;
+        }
+        // buffer -> window coordinates (layers may be scaled)
+        let sx = |x: i32| l.dst.x + ((x - l.src.x) as i64 * l.dst.w as i64 / l.src.w as i64) as i32;
+        let sy = |y: i32| l.dst.y + ((y - l.src.y) as i64 * l.dst.h as i64 / l.src.h as i64) as i32;
+        let d = Rect::new(sx(e.x), sy(e.y), sx(e.x + e.w) - sx(e.x), sy(e.y + e.h) - sy(e.y));
+        r = r.union(&d);
+    }
+    (!r.is_empty()).then_some(r)
+}
+
 /// The part of a window Android draws in: the union of its layers, leaving
 /// out fully transparent solid ones (the hwcomposer's window background in
 /// multi-window mode is the whole display, transparent, with the app's
