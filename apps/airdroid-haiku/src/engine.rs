@@ -391,10 +391,14 @@ impl Engine {
                 if let Some(cfg) = &self.vm {
                     match cfg.open_guest_mem() {
                         Ok(mem) => self.mem = Some(Arc::new(mem)),
-                        Err(e) => self.status(&format!("Cannot see Android's memory: {e}")),
+                        Err(e) => {
+                            eprintln!("airDroid: guest memory: {e}");
+                            self.status(&format!("Cannot see Android's memory: {e}"))
+                        }
                     }
                 }
             }
+            ToHost::Log { text } if debug() => eprintln!("airDroid: guest: {text}"),
             ToHost::Status { stage, detail } => match stage {
                 BootStage::Init | BootStage::StartingAndroid => self.status("Starting Android…"),
                 BootStage::FormattingData => self.status("Preparing Android's storage (first start)…"),
@@ -411,7 +415,13 @@ impl Engine {
             ToHost::Log { .. } => {}
             ToHost::BufferNew { id, width, height, stride, format, ranges } => {
                 if let Some(mem) = &self.mem {
-                    self.buffers.insert(id, Buffer::new(mem, width, height, stride, format, &ranges));
+                    let b = Buffer::new(mem, width, height, stride, format, &ranges);
+                    if !b.valid && debug() {
+                        eprintln!("airDroid: buffer {id} {width}x{height} not in guest RAM: {:?}", &ranges[..ranges.len().min(4)]);
+                    }
+                    self.buffers.insert(id, b);
+                } else if debug() {
+                    eprintln!("airDroid: buffer {id} before guest RAM was mapped");
                 }
             }
             ToHost::BufferDestroy { id } => {
@@ -435,6 +445,12 @@ impl Engine {
                 self.windows.remove(&id);
             }
             ToHost::Frame { window, serial, width, height, layers, .. } => {
+                if debug() {
+                    eprintln!(
+                        "airDroid: frame {window}/{serial} {width}x{height} {:?}",
+                        layers.iter().map(|l| (l.buffer, l.dst, self.buffers.get(&l.buffer).map(|b| b.valid))).collect::<Vec<_>>()
+                    );
+                }
                 let multi = self.settings.multi_windows;
                 if let Some(w) = self.windows.get_mut(&window) {
                     let full = Rect::new(0, 0, width as i32, height as i32);
@@ -677,6 +693,11 @@ impl Engine {
             _ => {}
         }
     }
+}
+
+fn debug() -> bool {
+    static D: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *D.get_or_init(|| std::env::var("AIRDROID_DEBUG").is_ok())
 }
 
 fn display_name(a: &AppInfo) -> String {

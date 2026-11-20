@@ -58,7 +58,24 @@ fn launcher_activity(package: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{package} has no launcher activity"))
 }
 
+/// Android's display must be awake to draw anything (it sleeps after its
+/// screen-off timeout, and then composes black).
+fn wake() {
+    let _ = shell_user(&["/system/bin/input", "keyevent", "KEYCODE_WAKEUP"]);
+}
+
+/// A desktop window has no business going dark on Android's timer: keep
+/// the display on (air/OS does screen saving).
+pub fn keep_awake() {
+    let _ = shell_user(&["/system/bin/settings", "put", "system", "screen_off_timeout", "2147483647"]);
+    let _ = shell_user(&["/system/bin/svc", "power", "stayon", "true"]);
+    wake();
+}
+
 fn run(link: &HostLink, action: Action) -> Result<String, String> {
+    if matches!(action, Action::Launch(_) | Action::FullUi | Action::Intent(..)) {
+        wake();
+    }
     match action {
         Action::Install(path) => {
             let out = sh(&["/system/bin/pm", "install", "-r", "-g", &path])?;
@@ -106,18 +123,25 @@ fn launcher_components() -> Vec<String> {
     v
 }
 
-/// Names of launchable apps from Waydroid's platform service.
+/// Names of launchable apps from Waydroid's platform service. The call
+/// runs on its own thread with a deadline: a slow or wedged service must
+/// not hold up the app list (it then falls back to package names).
 fn app_names() -> std::collections::HashMap<String, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(crate::platform::Platform::connect().and_then(|p| p.apps()));
+    });
     let mut names = std::collections::HashMap::new();
-    match crate::platform::Platform::connect().and_then(|p| p.apps()) {
-        Ok(apps) => {
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(apps)) => {
             for a in apps {
                 if !a.name.is_empty() {
                     names.insert(a.package, a.name);
                 }
             }
         }
-        Err(e) => logf!("waydroidplatform: {e}"),
+        Ok(Err(e)) => logf!("waydroidplatform: {e}"),
+        Err(_) => logf!("waydroidplatform: no answer in 10 s"),
     }
     names
 }
@@ -125,6 +149,7 @@ fn app_names() -> std::collections::HashMap<String, String> {
 fn list(link: &HostLink) {
     let names = app_names();
     let comps = launcher_components();
+    logf!("{} launcher apps, {} names", comps.len(), names.len());
     let icons = format!("{}/data/icons", container::DATA_DISK);
     let apps: Vec<AppInfo> = comps
         .iter()

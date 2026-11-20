@@ -259,6 +259,7 @@ fn boot(link: &HostLink, cfg: &container::Config, inbox: &Arc<compositor::Inbox>
                 if exec::getprop("sys.boot_completed") == "1" {
                     let _ = multi;
                     status(&link, BootStage::Booted, &format!("Android booted in {:.1} s", start.elapsed().as_secs_f32()));
+                    apps::keep_awake();
                     apps::spawn(link.clone(), 0, apps::Action::List);
                     apps::watch_packages(link.clone());
                     return;
