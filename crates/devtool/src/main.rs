@@ -159,9 +159,23 @@ fn main() {
                     let mut h = host.lock().unwrap();
                     let Host { buffers, windows } = &mut *h;
                     if let Some(w) = windows.get_mut(&window) {
-                        w.canvas.resize(width, height);
-                        w.canvas.compose(&layers, buffers);
+                        // like the air/OS app in multi-window mode: only the
+                        // task's bounds (AIRDROID_DEV_CROP=1)
+                        let crop = std::env::var("AIRDROID_DEV_CROP").is_ok();
+                        match airdroid_core::compose::content_bounds(&layers).filter(|_| crop) {
+                            Some(b) => {
+                                w.canvas.resize(b.w as u32, b.h as u32);
+                                w.canvas.compose_at(&layers, buffers, b.x, b.y);
+                            }
+                            None => {
+                                w.canvas.resize(width, height);
+                                w.canvas.compose(&layers, buffers);
+                            }
+                        }
                         w.frames += 1;
+                        if std::env::var("AIRDROID_DEV_LAYERS").is_ok() {
+                            eprintln!("dev: frame {window}/{serial} {width}x{height} {:?}", layers.iter().map(|l| (l.buffer, l.dst, buffers.get(&l.buffer).map(|b| b.valid))).collect::<Vec<_>>());
+                        }
                     }
                     pending_done.push((window, serial));
                 }
@@ -174,7 +188,7 @@ fn main() {
                 ToHost::Apps { apps } => {
                     eprintln!("dev: {} apps", apps.len());
                     for a in apps {
-                        eprintln!("dev:   {} {} icon={}", a.package, a.activity, a.icon_png.map(|i| i.len()).unwrap_or(0));
+                        eprintln!("dev:   {} '{}' {} icon={}", a.package, a.name, a.activity, a.icon_png.map(|i| i.len()).unwrap_or(0));
                     }
                 }
                 ToHost::Clipboard { text } => eprintln!("dev: clipboard: {text}"),

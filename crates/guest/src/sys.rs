@@ -1,6 +1,6 @@
 //! Thin wrappers over the Linux calls the daemon needs as PID 1.
 
-use std::collections::HashMap;
+
 use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;

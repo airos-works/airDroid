@@ -106,7 +106,24 @@ fn launcher_components() -> Vec<String> {
     v
 }
 
+/// Names of launchable apps from Waydroid's platform service.
+fn app_names() -> std::collections::HashMap<String, String> {
+    let mut names = std::collections::HashMap::new();
+    match crate::platform::Platform::connect().and_then(|p| p.apps()) {
+        Ok(apps) => {
+            for a in apps {
+                if !a.name.is_empty() {
+                    names.insert(a.package, a.name);
+                }
+            }
+        }
+        Err(e) => logf!("waydroidplatform: {e}"),
+    }
+    names
+}
+
 fn list(link: &HostLink) {
+    let names = app_names();
     let comps = launcher_components();
     let icons = format!("{}/data/icons", container::DATA_DISK);
     let apps: Vec<AppInfo> = comps
@@ -114,7 +131,7 @@ fn list(link: &HostLink) {
         .map(|c| {
             let package = c.split('/').next().unwrap_or(c).to_string();
             AppInfo {
-                name: package.clone(),
+                name: names.get(&package).cloned().unwrap_or_else(|| package.clone()),
                 icon_png: std::fs::read(format!("{icons}/{package}.png")).ok(),
                 package,
                 activity: c.clone(),

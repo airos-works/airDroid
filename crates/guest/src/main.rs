@@ -7,6 +7,8 @@
 //! management and files in.
 
 mod apps;
+mod binder;
+mod platform;
 mod compositor;
 mod container;
 mod exec;

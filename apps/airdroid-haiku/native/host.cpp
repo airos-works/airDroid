@@ -196,8 +196,10 @@ public:
 		if (fBitmap == NULL || fBitmap->Bounds().IntegerWidth() + 1 != width
 			|| fBitmap->Bounds().IntegerHeight() + 1 != height) {
 			delete fBitmap;
-			fBitmap = new BBitmap(BRect(0, 0, width - 1, height - 1),
-				B_BITMAP_NO_SERVER_LINK, B_RGB32);
+			// a server-linked bitmap: app_server draws straight from the
+			// area we write (B_BITMAP_NO_SERVER_LINK ones can't be drawn)
+			fBitmap = new BBitmap(BRect(0, 0, width - 1, height - 1), 0,
+				B_RGB32);
 		}
 		uint8* bits = (uint8*)fBitmap->Bits();
 		int32 bpr = fBitmap->BytesPerRow();
