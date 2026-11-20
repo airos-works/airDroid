@@ -24,6 +24,9 @@
   auto (virgl when there is a GPU), virgl, none (SwiftShader).
   Verified in the test VM with llvmpipe; not yet on GPU hardware.
 
+* Settings window (Android > Settings…): memory, processors, graphics
+  (automatic, the GPU, software), screen density, mouse clicks as
+  touches and the shared folder; they apply when Android starts next.
 * Shared folder: `~/Android` on air/OS is `/sdcard/airOS` in Android
   (virtio-9p, mounted in Android's namespace over its storage, so every
   app and the Files app see it); setting `shared_folder` ("" to turn it

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// Each Android app in its own window (Waydroid's multi_windows).
@@ -52,10 +52,54 @@ impl Settings {
             .unwrap_or_default()
     }
 
+    /// The settings window's answer: "key=value" lines (ram, cpus, gpu,
+    /// dpi, touch, share); unknown keys and bad values are ignored.
+    pub fn apply_text(&mut self, text: &str) {
+        for line in text.lines() {
+            let Some((k, v)) = line.split_once('=') else { continue };
+            match k {
+                "ram" => {
+                    if let Ok(n) = v.parse::<u64>() {
+                        self.ram_mb = n.clamp(1024, 65536);
+                    }
+                }
+                "cpus" => {
+                    if let Ok(n) = v.parse::<u32>() {
+                        self.cpus = n.clamp(1, 64);
+                    }
+                }
+                "gpu" if ["auto", "virgl", "none"].contains(&v) => self.gpu = v.to_string(),
+                "dpi" => {
+                    if let Ok(n) = v.parse() {
+                        self.dpi = n;
+                    }
+                }
+                "touch" => self.mouse_as_touch = v == "1",
+                "share" => self.shared_folder = v.trim().to_string(),
+                _ => {}
+            }
+        }
+    }
+
     pub fn save(&self, dir: &Path) {
         let _ = std::fs::create_dir_all(dir);
         if let Ok(t) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(dir.join("settings.json"), t);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_window_text() {
+        let mut s = Settings::default();
+        s.apply_text("ram=6144\ncpus=6\ngpu=none\ndpi=213\ntouch=1\nshare=\nbogus=1\n");
+        assert_eq!((s.ram_mb, s.cpus, s.gpu.as_str(), s.dpi, s.mouse_as_touch), (6144, 6, "none", 213, true));
+        assert_eq!(s.shared_folder, "");
+        s.apply_text("gpu=fast\nram=x\nshare=/boot/home/Shared\n");
+        assert_eq!((s.gpu.as_str(), s.ram_mb, s.shared_folder.as_str()), ("none", 6144, "/boot/home/Shared"));
     }
 }

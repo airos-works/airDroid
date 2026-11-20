@@ -13,6 +13,7 @@
 #include <Bitmap.h>
 #include <BitmapStream.h>
 #include <Button.h>
+#include <CheckBox.h>
 #include <Clipboard.h>
 #include <Cursor.h>
 #include <algorithm>
@@ -30,6 +31,7 @@
 #include <MenuBar.h>
 #include <MediaRecorder.h>
 #include <MediaRoster.h>
+#include <MenuField.h>
 #include <MenuItem.h>
 #include <Message.h>
 #include <MessageRunner.h>
@@ -38,7 +40,9 @@
 #include <NodeInfo.h>
 #include <Notification.h>
 #include <String.h>
+#include <OS.h>
 #include <Path.h>
+#include <PopUpMenu.h>
 #include <Region.h>
 #include <Roster.h>
 #include <Screen.h>
@@ -46,6 +50,7 @@
 #include <ScrollView.h>
 #include <StatusBar.h>
 #include <StringView.h>
+#include <TextControl.h>
 #include <TranslationUtils.h>
 #include <View.h>
 #include <Window.h>
@@ -113,6 +118,8 @@ enum {
 	AD_ACT_REMOVE_APP = 5,	// text: package
 	AD_ACT_SETUP = 6,
 	AD_ACT_TOGGLE_MULTIWINDOW = 7,
+	AD_ACT_SETTINGS = 8,		// opens the settings window
+	AD_ACT_SAVE_SETTINGS = 9,	// text: "key=value" lines
 };
 
 static const uint32 kMsgAction = 'adAc';
@@ -596,6 +603,9 @@ public:
 		android->AddItem(new BMenuItem("Stop", _Action(AD_ACT_STOP)));
 		android->AddItem(new BMenuItem("Download Android again" B_UTF8_ELLIPSIS,
 			_Action(AD_ACT_SETUP)));
+		android->AddSeparatorItem();
+		android->AddItem(new BMenuItem("Settings" B_UTF8_ELLIPSIS,
+			_Action(AD_ACT_SETTINGS), ','));
 		bar->AddItem(android);
 
 		fStatus = new BStringView("status", "Starting" B_UTF8_ELLIPSIS);
@@ -698,6 +708,197 @@ private:
 	BListView*		fApps;
 	BButton*		fShowButton;
 	BMenuItem*		fMultiItem;
+};
+
+
+// #pragma mark - settings
+
+
+static const uint32 kMsgSettingsSave = 'adSv';
+static const uint32 kMsgShareToggled = 'adSt';
+static const uint32 kMsgShareChoose = 'adSc';
+static const uint32 kMsgShareChosen = 'adSC';
+
+
+/*! Android's VM and display: memory, processors, graphics, density, mouse
+	as touch and the shared folder. Saving sends them to the engine as
+	"key=value" lines (AD_ACT_SAVE_SETTINGS); they apply when Android
+	starts next. */
+class SettingsWindow : public BWindow {
+public:
+	SettingsWindow(uint32 ramMB, uint32 cpus, uint32 gpu, uint32 dpi,
+			bool touch, const char* share)
+		:
+		BWindow(BRect(140, 140, 600, 460), "airDroid settings",
+			B_TITLED_WINDOW, B_ASYNCHRONOUS_CONTROLS | B_NOT_ZOOMABLE
+				| B_NOT_RESIZABLE | B_AUTO_UPDATE_SIZE_LIMITS
+				| B_CLOSE_ON_ESCAPE),
+		fPanel(NULL)
+	{
+		system_info info;
+		get_system_info(&info);
+		uint64 totalMB = info.max_pages * (uint64)B_PAGE_SIZE / (1024 * 1024);
+		uint32 maxCpus = info.cpu_count;
+
+		fRam = new BPopUpMenu("ram");
+		const uint32 sizes[] = { 2048, 3072, 4096, 6144, 8192, 12288, 16384 };
+		for (uint32 size : sizes) {
+			// at most three quarters of the machine (and the current value)
+			if (size > totalMB * 3 / 4 && size != ramMB)
+				continue;
+			BString label;
+			label << size / 1024 << " GB";
+			_AddItem(fRam, label, size, size == ramMB);
+		}
+		fCpus = new BPopUpMenu("cpus");
+		for (uint32 n = 1; n <= std::max(maxCpus, cpus); n++) {
+			BString label;
+			label << n;
+			_AddItem(fCpus, label, n, n == cpus);
+		}
+		fGpu = new BPopUpMenu("gpu");
+		_AddItem(fGpu, "Automatic", 0, gpu == 0);
+		_AddItem(fGpu, "The GPU (virgl)", 1, gpu == 1);
+		_AddItem(fGpu, "Software (SwiftShader)", 2, gpu == 2);
+		fDpi = new BPopUpMenu("dpi");
+		const uint32 densities[] = { 0, 120, 160, 213, 240, 280, 320 };
+		for (uint32 d : densities) {
+			BString label;
+			if (d == 0)
+				label = "Android's default";
+			else
+				label << d << " dpi";
+			_AddItem(fDpi, label, d, d == dpi);
+		}
+		fTouch = new BCheckBox("touch", "Mouse clicks are touches", NULL);
+		fTouch->SetValue(touch ? B_CONTROL_ON : B_CONTROL_OFF);
+		fShare = new BCheckBox("share",
+			"Share a folder with Android (as /sdcard/airOS):",
+			new BMessage(kMsgShareToggled));
+		fShare->SetValue(share[0] != '\0' ? B_CONTROL_ON : B_CONTROL_OFF);
+		fSharePath = new BTextControl("path", NULL,
+			share[0] != '\0' ? share : "~/Android", NULL);
+		fChoose = new BButton("choose", "Choose" B_UTF8_ELLIPSIS,
+			new BMessage(kMsgShareChoose));
+		BStringView* note = new BStringView("note",
+			"Changes apply the next time Android starts.");
+		BButton* save = new BButton("save", "Save", new BMessage(kMsgSettingsSave));
+		BButton* cancel = new BButton("cancel", "Cancel",
+			new BMessage(B_QUIT_REQUESTED));
+		SetDefaultButton(save);
+
+		BLayoutBuilder::Group<>(this, B_VERTICAL)
+			.SetInsets(B_USE_WINDOW_SPACING)
+			.AddGrid()
+				.AddMenuField(new BMenuField("Memory:", fRam), 0, 0)
+				.AddMenuField(new BMenuField("Processors:", fCpus), 0, 1)
+				.AddMenuField(new BMenuField("Graphics:", fGpu), 0, 2)
+				.AddMenuField(new BMenuField("Screen density:", fDpi), 0, 3)
+			.End()
+			.Add(fTouch)
+			.Add(fShare)
+			.AddGroup(B_HORIZONTAL)
+				.Add(fSharePath, 1.0)
+				.Add(fChoose)
+			.End()
+			.Add(note)
+			.AddGroup(B_HORIZONTAL)
+				.AddGlue()
+				.Add(cancel)
+				.Add(save)
+			.End();
+		_UpdateShare();
+		CenterOnScreen();
+	}
+
+	~SettingsWindow()
+	{
+		delete fPanel;
+	}
+
+	virtual void MessageReceived(BMessage* message)
+	{
+		switch (message->what) {
+			case kMsgShareToggled:
+				_UpdateShare();
+				break;
+			case kMsgShareChoose:
+				if (fPanel == NULL) {
+					fPanel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this),
+						NULL, B_DIRECTORY_NODE, false,
+						new BMessage(kMsgShareChosen));
+					fPanel->Window()->SetTitle("airDroid: Shared folder");
+				}
+				fPanel->Show();
+				break;
+			case kMsgShareChosen:
+			{
+				entry_ref ref;
+				if (message->FindRef("refs", &ref) == B_OK) {
+					BPath path(&ref);
+					fSharePath->SetText(path.Path());
+				}
+				break;
+			}
+			case kMsgSettingsSave:
+			{
+				BString text;
+				text << "ram=" << _Value(fRam) << "\n"
+					<< "cpus=" << _Value(fCpus) << "\n"
+					<< "gpu=" << (_Value(fGpu) == 1 ? "virgl"
+						: _Value(fGpu) == 2 ? "none" : "auto") << "\n"
+					<< "dpi=" << _Value(fDpi) << "\n"
+					<< "touch=" << (fTouch->Value() == B_CONTROL_ON ? 1 : 0) << "\n"
+					<< "share=" << (fShare->Value() == B_CONTROL_ON
+						? fSharePath->Text() : "") << "\n";
+				AdEvent event = MakeEvent(AD_ACTION, 0);
+				event.key = AD_ACT_SAVE_SETTINGS;
+				Push(event, text.String());
+				Quit();
+				break;
+			}
+			default:
+				BWindow::MessageReceived(message);
+		}
+	}
+
+private:
+	static void _AddItem(BPopUpMenu* menu, const char* label, uint32 value,
+		bool marked)
+	{
+		BMessage* m = new BMessage('adVl');
+		m->AddUInt32("value", value);
+		BMenuItem* item = new BMenuItem(label, m);
+		menu->AddItem(item);
+		if (marked)
+			item->SetMarked(true);
+	}
+
+	static uint32 _Value(BPopUpMenu* menu)
+	{
+		BMenuItem* item = menu->FindMarked();
+		uint32 value = 0;
+		if (item != NULL && item->Message() != NULL)
+			item->Message()->FindUInt32("value", &value);
+		return value;
+	}
+
+	void _UpdateShare()
+	{
+		bool on = fShare->Value() == B_CONTROL_ON;
+		fSharePath->SetEnabled(on);
+		fChoose->SetEnabled(on);
+	}
+
+	BPopUpMenu*		fRam;
+	BPopUpMenu*		fCpus;
+	BPopUpMenu*		fGpu;
+	BPopUpMenu*		fDpi;
+	BCheckBox*		fTouch;
+	BCheckBox*		fShare;
+	BTextControl*	fSharePath;
+	BButton*		fChoose;
+	BFilePanel*		fPanel;
 };
 
 
@@ -1156,6 +1357,26 @@ ad_main_set_status(const char* text, float progress)
 		return;
 	sMain->SetStatus(text, progress);
 	sMain->Unlock();
+}
+
+
+/*! The settings window (one at a time). gpu: 0 auto, 1 virgl, 2 none. */
+void
+ad_settings_show(uint32 ramMB, uint32 cpus, uint32 gpu, uint32 dpi,
+	int touch, const char* share)
+{
+	static BMessenger sWindow;
+	if (sWindow.IsValid()) {
+		BMessage activate(B_SET_PROPERTY);
+		activate.AddSpecifier("Active");
+		activate.AddBool("data", true);
+		sWindow.SendMessage(&activate);
+		return;
+	}
+	SettingsWindow* w = new SettingsWindow(ramMB, cpus, gpu, dpi, touch != 0,
+		share);
+	sWindow = BMessenger(w);
+	w->Show();
 }
 
 

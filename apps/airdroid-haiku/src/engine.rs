@@ -1023,6 +1023,15 @@ impl Engine {
                     host::main_set_multiwindow(self.settings.multi_windows);
                     host::alert("airDroid", "The change takes effect when Android starts next time.");
                 }
+                action::SETTINGS => host::settings_show(&self.settings),
+                action::SAVE_SETTINGS => {
+                    let before = self.settings.clone();
+                    self.settings.apply_text(&e.text);
+                    self.settings.save(&self.paths.settings);
+                    if self.session.is_some() && self.settings != before {
+                        host::main_set_status("Settings saved: they apply the next time Android starts.", -1.0);
+                    }
+                }
                 action::REMOVE_APP => {
                     if let Some(s) = &self.session {
                         let _ = s.send(&ToGuest::RemoveApp { req: s.next_req(), package: e.text.clone() });

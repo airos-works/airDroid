@@ -52,6 +52,8 @@ pub mod action {
     pub const REMOVE_APP: i32 = 5;
     pub const SETUP: i32 = 6;
     pub const TOGGLE_MULTIWINDOW: i32 = 7;
+    pub const SETTINGS: i32 = 8;
+    pub const SAVE_SETTINGS: i32 = 9;
 }
 
 /// An event with its text payload (paths, arguments, clipboard text).
@@ -108,6 +110,7 @@ mod ffi {
         pub fn ad_mic_open(id: u32, rate: u32, channels: u32) -> i32;
         pub fn ad_mic_take(id: u32, out: *mut i16, max: usize) -> usize;
         pub fn ad_mic_close(id: u32);
+        pub fn ad_settings_show(ram_mb: u32, cpus: u32, gpu: u32, dpi: u32, touch: i32, share: *const libc::c_char);
         pub fn ad_notify(
             id: u32,
             app: *const libc::c_char,
@@ -259,6 +262,14 @@ mod imp {
     pub fn mic_close(id: u32) {
         unsafe { ffi::ad_mic_close(id) }
     }
+    pub fn settings_show(s: &crate::settings::Settings) {
+        let gpu = match s.gpu.as_str() {
+            "virgl" => 1,
+            "none" => 2,
+            _ => 0,
+        };
+        unsafe { ffi::ad_settings_show(s.ram_mb as u32, s.cpus, gpu, s.dpi, s.mouse_as_touch as i32, c(&s.shared_folder).as_ptr()) }
+    }
     pub fn notify(id: u32, app: &str, package: &str, title: &str, body: &str, image: Option<&airdroid_core::proto::NotifyImage>, png: Option<&[u8]>) {
         let (ip, w, h, rs, a) = match image {
             Some(i) if i.data.len() >= (i.rowstride as usize) * (i.height as usize) => (i.data.as_ptr(), i.width as i32, i.height as i32, i.rowstride as i32, i.has_alpha as i32),
@@ -330,6 +341,7 @@ mod imp {
         Vec::new()
     }
     pub fn mic_close(id: u32) {}
+    pub fn settings_show(s: &crate::settings::Settings) {}
     pub fn notify(id: u32, app: &str, package: &str, title: &str, body: &str, image: Option<&airdroid_core::proto::NotifyImage>, png: Option<&[u8]>) {
         eprintln!("notification {id} {app}: {title}: {body}");
     }
