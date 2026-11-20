@@ -1,0 +1,66 @@
+--- a/ui/egl-helpers.c	2025-12-24 06:48:57.000000000 +1100
++++ b/ui/egl-helpers.c	2026-11-21 01:18:57.118699122 +1100
+@@ -490,7 +490,7 @@
+ 
+ /* ---------------------------------------------------------------------- */
+ 
+-#if defined(CONFIG_X11) || defined(CONFIG_GBM) || defined(WIN32)
++#if defined(CONFIG_X11) || defined(CONFIG_GBM) || defined(WIN32) || defined(__HAIKU__)
+ 
+ /*
+  * Taken from glamor_egl.h from the Xorg xserver, which is MIT licensed
+@@ -565,6 +565,16 @@
+     EGLBoolean b;
+     EGLint n;
+     bool gles = (mode == DISPLAY_GL_MODE_ES);
++#ifdef EGL_PLATFORM_SURFACELESS_MESA
++    /* a surfaceless display has no window configs: any surface type */
++    EGLint conf_att[G_N_ELEMENTS(conf_att_core)];
++    memcpy(conf_att, gles ? conf_att_gles : conf_att_core, sizeof(conf_att));
++    if (platform == EGL_PLATFORM_SURFACELESS_MESA) {
++        conf_att[1] = EGL_PBUFFER_BIT;
++    }
++#else
++    const EGLint *conf_att = gles ? conf_att_gles : conf_att_core;
++#endif
+ 
+     qemu_egl_display = qemu_egl_get_display(dpy, platform);
+     if (qemu_egl_display == EGL_NO_DISPLAY) {
+@@ -585,8 +595,7 @@
+         return -1;
+     }
+ 
+-    b = eglChooseConfig(qemu_egl_display,
+-                        gles ? conf_att_gles : conf_att_core,
++    b = eglChooseConfig(qemu_egl_display, conf_att,
+                         &qemu_egl_config, 1, &n);
+     if (b == EGL_FALSE || n != 1) {
+         error_report("egl: eglChooseConfig failed (%s mode): %s",
+@@ -723,6 +732,27 @@
+         error_setg(errp, "egl: render node init failed");
+         return false;
+     }
++#elif defined(__HAIKU__)
++    /*
++     * air/OS has no GBM and no render nodes to hand out: Mesa's surfaceless
++     * EGL platform renders off screen, which is all virtio-gpu's 3D needs
++     * (airDroid shows the guest's frames itself).
++     */
++    if (qemu_egl_init_dpy(EGL_DEFAULT_DISPLAY, EGL_PLATFORM_SURFACELESS_MESA,
++                          mode) < 0) {
++        error_setg(errp, "egl: surfaceless display init failed");
++        return false;
++    }
++    if (!epoxy_has_egl_extension(qemu_egl_display,
++                                 "EGL_KHR_surfaceless_context")) {
++        error_setg(errp, "egl: EGL_KHR_surfaceless_context not supported");
++        return false;
++    }
++    qemu_egl_rn_ctx = qemu_egl_init_ctx();
++    if (!qemu_egl_rn_ctx) {
++        error_setg(errp, "egl: egl_init_ctx failed");
++        return false;
++    }
+ #endif
+ 
+     if (!qemu_egl_rn_ctx) {

@@ -1,0 +1,74 @@
+diff --git a/meson.build b/meson.build
+index 193ba32..b3398e1 100644
+--- a/meson.build
++++ b/meson.build
+@@ -288,7 +288,7 @@ endif
+ 
+ if with_egl
+    if cc.has_header('epoxy/egl.h', dependencies: epoxy_dep) and epoxy_dep.get_variable(pkgconfig: 'epoxy_has_egl') == '1'
+-      if with_host_windows or with_host_darwin
++      if with_host_windows or with_host_darwin or host_machine.system() == 'haiku'
+          have_egl = true
+       else
+          if libdrm_dep.found()
+@@ -429,7 +429,9 @@ endif
+ 
+ subdir('src')
+ if not with_host_windows
+-   subdir('vtest')
++   if host_machine.system() != 'haiku'
++      subdir('vtest')
++   endif
+ endif
+ 
+ if with_render_server
+diff --git a/src/mesa/util/libsync.h b/src/mesa/util/libsync.h
+index 863df4e..ca1dcf9 100644
+--- a/src/mesa/util/libsync.h
++++ b/src/mesa/util/libsync.h
+@@ -56,6 +56,11 @@
+ extern "C" {
+ #endif
+ 
++/* Haiku has no sync files (nor _IOWR); the calls below then just fail. */
++#ifndef _IOWR
++#define _IOWR(type, nr, size) ((unsigned long)((((type) & 0xff) << 8) | (nr)))
++#endif
++
+ #ifndef SYNC_IOC_MERGE
+ /* duplicated from linux/sync_file.h to avoid build-time dependency
+  * on new (v4.7) kernel headers.  Once distro's are mostly using
+diff --git a/src/mesa/util/u_thread.h b/src/mesa/util/u_thread.h
+index 366c8e9..a5786c3 100644
+--- a/src/mesa/util/u_thread.h
++++ b/src/mesa/util/u_thread.h
+@@ -363,16 +363,16 @@ static inline void util_barrier_wait(util_barrier *barrier)
+  * Thread-id's.
+  *
+  * thrd_current() is not portable to windows (or at least not in a desirable
+- * way), so thread_id's provide an alternative mechanism
++ * way), so util_thread_id_t's provide an alternative mechanism
+  */
+ 
+ #ifdef _WIN32
+-typedef DWORD thread_id;
++typedef DWORD util_thread_id_t;
+ #else
+-typedef thrd_t thread_id;
++typedef thrd_t util_thread_id_t;
+ #endif
+ 
+-static inline thread_id
++static inline util_thread_id_t
+ util_get_thread_id(void)
+ {
+    /*
+@@ -391,7 +391,7 @@ util_get_thread_id(void)
+ 
+ 
+ static inline int
+-util_thread_id_equal(thread_id t1, thread_id t2)
++util_thread_id_equal(util_thread_id_t t1, util_thread_id_t t2)
+ {
+ #ifdef _WIN32
+    return t1 == t2;
