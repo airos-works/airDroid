@@ -41,6 +41,7 @@ pub mod kind {
     pub const ACTION: i32 = 16;
     pub const APP_CLICKED: i32 = 17;
     pub const CLIPBOARD: i32 = 18;
+    pub const TASK_BOUNDS: i32 = 19;
 }
 
 pub mod action {

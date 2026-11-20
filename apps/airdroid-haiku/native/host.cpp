@@ -15,6 +15,7 @@
 #include <Button.h>
 #include <Clipboard.h>
 #include <Cursor.h>
+#include <algorithm>
 #include <DataIO.h>
 #include <Directory.h>
 #include <Entry.h>
@@ -98,6 +99,7 @@ enum {
 	AD_ACTION = 16,			// key: action id below
 	AD_APP_CLICKED = 17,	// text: package
 	AD_CLIPBOARD = 18,		// text: clipboard text
+	AD_TASK_BOUNDS = 19,	// x, y: left top; dx, dy: width height (screen)
 };
 
 // AD_ACTION ids (the main window's menu and buttons)
@@ -182,7 +184,10 @@ public:
 			B_WILL_DRAW | B_FRAME_EVENTS | B_NAVIGABLE),
 		fId(id),
 		fBitmap(NULL),
-		fCursorHidden(false)
+		fCursorHidden(false),
+		fBorderless(false),
+		fResizeEdges(0),
+		fResizing(false)
 	{
 		SetViewColor(B_TRANSPARENT_COLOR);
 		SetDrawingMode(B_OP_COPY);
@@ -230,10 +235,65 @@ public:
 		FillRegion(&rest);
 	}
 
+	void SetBorderless(bool borderless) { fBorderless = borderless; }
+
+	// Multi-window windows have no border: their edges resize them, and
+	// Android then gives the app's task the new bounds.
+	enum { kLeft = 1, kTop = 2, kRight = 4, kBottom = 8 };
+	static const int kEdge = 6;
+
+	uint32 EdgesAt(BPoint where) const
+	{
+		if (!fBorderless)
+			return 0;
+		BRect b = Bounds();
+		uint32 edges = 0;
+		if (where.x < b.left + kEdge)
+			edges |= kLeft;
+		else if (where.x > b.right - kEdge)
+			edges |= kRight;
+		if (where.y < b.top + kEdge)
+			edges |= kTop;
+		else if (where.y > b.bottom - kEdge)
+			edges |= kBottom;
+		return edges;
+	}
+
+	void SetEdgeCursor(uint32 edges)
+	{
+		if (edges == fResizeEdges)
+			return;
+		fResizeEdges = edges;
+		BCursorID id = B_CURSOR_ID_SYSTEM_DEFAULT;
+		switch (edges) {
+			case kLeft: case kRight: id = B_CURSOR_ID_RESIZE_EAST_WEST; break;
+			case kTop: case kBottom: id = B_CURSOR_ID_RESIZE_NORTH_SOUTH; break;
+			case kLeft | kTop: case kRight | kBottom:
+				id = B_CURSOR_ID_RESIZE_NORTH_WEST_SOUTH_EAST; break;
+			case kRight | kTop: case kLeft | kBottom:
+				id = B_CURSOR_ID_RESIZE_NORTH_EAST_SOUTH_WEST; break;
+		}
+		if (id == B_CURSOR_ID_SYSTEM_DEFAULT && fCursorHidden) {
+			BCursor cursor(B_CURSOR_ID_NO_CURSOR);
+			SetViewCursor(&cursor);
+		} else {
+			BCursor cursor(id);
+			SetViewCursor(&cursor);
+		}
+	}
+
 	virtual void MouseDown(BPoint where)
 	{
 		MakeFocus(true);
 		SetMouseEventMask(B_POINTER_EVENTS, B_NO_POINTER_HISTORY);
+		uint32 edges = EdgesAt(where);
+		if (edges != 0) {
+			SetEdgeCursor(edges);
+			fResizing = true;
+			fResizeStart = ConvertToScreen(where);
+			fStartFrame = Window()->Frame();
+			return;
+		}
 		AdEvent event = MakeEvent(AD_MOUSE_DOWN, fId);
 		event.x = where.x;
 		event.y = where.y;
@@ -248,6 +308,17 @@ public:
 
 	virtual void MouseUp(BPoint where)
 	{
+		if (fResizing) {
+			fResizing = false;
+			BRect f = Window()->Frame();
+			AdEvent event = MakeEvent(AD_TASK_BOUNDS, fId);
+			event.x = f.left;
+			event.y = f.top;
+			event.dx = f.Width() + 1;
+			event.dy = f.Height() + 1;
+			Push(event);
+			return;
+		}
 		AdEvent event = MakeEvent(AD_MOUSE_UP, fId);
 		event.x = where.x;
 		event.y = where.y;
@@ -260,10 +331,32 @@ public:
 	virtual void MouseMoved(BPoint where, uint32 transit,
 		const BMessage* dragMessage)
 	{
+		if (fResizing) {
+			BPoint p = ConvertToScreen(where);
+			float dx = p.x - fResizeStart.x, dy = p.y - fResizeStart.y;
+			BRect f = fStartFrame;
+			const float kMinW = 160, kMinH = 120;
+			if (fResizeEdges & kLeft)
+				f.left = std::min(f.left + dx, f.right - kMinW);
+			if (fResizeEdges & kRight)
+				f.right = std::max(f.right + dx, f.left + kMinW);
+			if (fResizeEdges & kTop)
+				f.top = std::min(f.top + dy, f.bottom - kMinH);
+			if (fResizeEdges & kBottom)
+				f.bottom = std::max(f.bottom + dy, f.top + kMinH);
+			Window()->MoveTo(f.LeftTop());
+			Window()->ResizeTo(f.Width(), f.Height());
+			return;
+		}
 		if (transit == B_EXITED_VIEW) {
+			SetEdgeCursor(0);
 			Push(MakeEvent(AD_MOUSE_EXITED, fId));
 			return;
 		}
+		uint32 edges = EdgesAt(where);
+		SetEdgeCursor(edges);
+		if (edges != 0)
+			return;
 		AdEvent event = MakeEvent(AD_MOUSE_MOVED, fId);
 		event.x = where.x;
 		event.y = where.y;
@@ -317,6 +410,8 @@ public:
 		if (hidden == fCursorHidden)
 			return;
 		fCursorHidden = hidden;
+		if (fResizeEdges != 0)
+			return;
 		if (hidden) {
 			BCursor cursor(B_CURSOR_ID_NO_CURSOR);
 			SetViewCursor(&cursor);
@@ -343,6 +438,11 @@ private:
 	uint32		fId;
 	BBitmap*	fBitmap;
 	bool		fCursorHidden;
+	bool		fBorderless;
+	uint32		fResizeEdges;
+	bool		fResizing;
+	BPoint		fResizeStart;
+	BRect		fStartFrame;
 };
 
 
@@ -357,6 +457,7 @@ public:
 		fId(id)
 	{
 		fView = new AndroidView(Bounds(), id);
+		fView->SetBorderless(borderless);
 		AddChild(fView);
 		fView->MakeFocus(true);
 		// Android keeps every key: none of BWindow's own Command shortcuts

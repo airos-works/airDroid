@@ -24,6 +24,9 @@
   auto (virgl when there is a GPU), virgl, none (SwiftShader).
   Verified in the test VM with llvmpipe; not yet on GPU hardware.
 
+* Multi-window resizing: the edges of an app's (borderless) window resize
+  it on the desktop, and Android gives the app's task the new bounds
+  (`am task resize`); moving works through Android's own caption bar.
 * Notifications: Android's notifications show on the air/OS desktop
   (BNotification with the app's name and icon; clicking one starts the
   app). airDroid serves Waydroid's `waydroidnotifications` binder service

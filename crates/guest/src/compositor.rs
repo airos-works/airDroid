@@ -1823,6 +1823,13 @@ pub fn run(link: HostLink, inbox: Arc<Inbox>, socket: &str, out: OutputCfg) -> s
                 ToGuest::Focus { window } => st.focus(window),
                 ToGuest::WindowResize { id, width, height } => st.window_resize(id, width, height),
                 ToGuest::WindowClose { id } => st.window_close(id),
+                ToGuest::TaskBounds { id, x, y, width, height } => {
+                    if let Some(w) = st.windows.get(&id) {
+                        if let Some(package) = w.app_id.strip_prefix("waydroid.") {
+                            crate::apps::resize_task(package.to_string(), x, y, width, height);
+                        }
+                    }
+                }
                 ToGuest::Output { width, height, refresh_mhz, dpi } => st.set_output(OutputCfg { width, height, refresh_mhz, dpi }),
                 ToGuest::Clipboard { text } => st.offer_clipboard(&dh, text),
                 _ => {}

@@ -199,3 +199,27 @@ pub fn watch_packages(link: HostLink) {
         }
     });
 }
+
+/// Multi-window: gives `package`'s visible freeform task the bounds
+/// (left, top, width, height), as the desktop window was resized.
+pub fn resize_task(package: String, x: i32, y: i32, w: u32, h: u32) {
+    std::thread::spawn(move || {
+        let list = match shell_user(&["am", "stack", "list"]) {
+            Ok(l) => l,
+            Err(e) => return logf!("resize {package}: {e}"),
+        };
+        // "  taskId=23: com.android.settings/... bounds=[..] userId=0 visible=true ..."
+        let task = list.lines().map(str::trim).find_map(|l| {
+            let rest = l.strip_prefix("taskId=")?;
+            let (id, rest) = rest.split_once(": ")?;
+            (rest.starts_with(&format!("{package}/")) && rest.contains("visible=true")).then(|| id.to_string())
+        });
+        let Some(task) = task else {
+            return logf!("resize {package}: no visible task");
+        };
+        let (r, b) = ((x + w as i32).to_string(), (y + h as i32).to_string());
+        if let Err(e) = shell_user(&["am", "task", "resize", &task, &x.to_string(), &y.to_string(), &r, &b]) {
+            logf!("resize {package}: {e}");
+        }
+    });
+}

@@ -912,6 +912,9 @@ impl Engine {
                     }
                 }
             }
+            kind::TASK_BOUNDS => {
+                self.send(ToGuest::TaskBounds { id: win, x: ev.x as i32, y: ev.y as i32, width: ev.dx as u32, height: ev.dy as u32 })
+            }
             kind::WINDOW_ACTIVATED => self.send(ToGuest::Focus { window: Some(win) }),
             kind::WINDOW_DEACTIVATED => {}
             kind::REFS => {

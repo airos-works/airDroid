@@ -330,6 +330,15 @@ pub enum ToGuest {
     WindowClose {
         id: u32,
     },
+    /// Multi-window: the user resized the app's window on the desktop;
+    /// its task gets these bounds (display coordinates).
+    TaskBounds {
+        id: u32,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
     /// Run a command. `android`: inside the Android container with Android's
     /// environment (like `waydroid shell`), else in the VM's own userland.
     Exec {

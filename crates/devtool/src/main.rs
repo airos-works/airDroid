@@ -307,6 +307,7 @@ fn command(line: &str, host: &Arc<Mutex<Host>>, s: &Session) {
             s.send(&ToGuest::Key { window: win, code, pressed: false })
         }
         Some("close") => s.send(&ToGuest::WindowClose { id: win }),
+        Some("bounds") => s.send(&ToGuest::TaskBounds { id: win, x: num(2) as i32, y: num(3) as i32, width: num(4) as u32, height: num(5) as u32 }),
         Some("sh") | Some("vm") | Some("shsh") => {
             let android = parts[0] != "vm";
             let uid = (parts[0] == "shsh").then_some(2000);
