@@ -58,14 +58,21 @@ Threadripper (AMD, NVMM's SVM path) with a GTX 1080 Ti:
   median frame 9 ms (GPU 6 ms), 99th percentile 25 ms; the host presented
   about 65 frames a second.
 * Quit with Android booted: 2 s, nothing left behind.
-* **Blocker:** the first session left Android's data disk (ext4 in the
-  qcow2) corrupt (an inode table and a directory block lost; qcow2 itself
-  consistent), and the next test boot hung the whole computer (no ping, no
-  syslog). Every earlier test ran NVMM's VMX/EPT path (Intel hosts); the
-  suspect is NVMM's SVM/RVI path (nested page invalidation). Until it is
-  fixed airDroid refuses to start on AMD processors (settings
-  `allow_amd: true` overrides it, for testing), and it is not in the
-  images.
+* The first session left Android's data disk (ext4 in the qcow2) corrupt,
+  and the next test boot hung the whole computer (no ping, no syslog).
+* The corruption was BFS, not NVMM: the same boot under TCG (no NVMM)
+  corrupted the disk too, and a native test (bfs_concurrent_grow_test)
+  lost 113 of 257 blocks written by concurrent writers to a growing file.
+  BFS zeroed a growing write's gap after releasing the inode lock, over
+  data other writers had put there meanwhile (QEMU's I/O threads on a
+  growing qcow2). Fixed in haiku 4879942cdc; with it Android's first boot
+  leaves a clean disk (e2fsck) in the x86_64 test VM. linuxvm (Docker)
+  runs the same QEMU and was exposed to it too.
+* The hang is not explained yet: it may have been the same corruption
+  (BFS metadata), or NVMM's SVM path. Until the X399 has been retested
+  on an image with the BFS fix, airDroid refuses to start on AMD
+  processors (settings `allow_amd: true` overrides it, for testing), and
+  it is not in the images.
 
 ## Needs
 
