@@ -7,10 +7,20 @@ toolchains; nothing builds on air/OS itself.
 
 | Step | Script | Output |
 |---|---|---|
-| Guest kernel (Linux 6.18.52 + `kernel/airdroid.config`) | `tools/build-kernel.sh` | `build/x86_64/vmlinuz` |
+| Guest kernel (Linux 6.18.52 + `kernel/airdroid.config` + `kernel/patches`) | `tools/build-kernel.sh` | `build/x86_64/vmlinuz` |
 | Guest userland (`airdroid-guest` for musl as `/init`, Alpine busybox and e2fsprogs) | `tools/build-guest.sh` | `build/x86_64/initramfs.img` |
-| QEMU for air/OS (linuxvm's build + `qemu/patches`) | `LINUXVM=../linuxvm tools/build-qemu.sh` | `build/x86_64/qemu/` |
+| QEMU for air/OS (linuxvm's build + `qemu/patches`; with `GPU=1`, the default, OpenGL and virglrenderer from `tools/build-gpu.sh`) | `LINUXVM=../linuxvm tools/build-qemu.sh` | `build/x86_64/qemu/` |
 | The app and the `airdroid` command, packaged | `tools/haiku/package.sh` | `artifacts/airdroid-VERSION-x86_64.hpkg` |
+
+`tools/build-all.sh` runs them all in order (about 5 minutes from an empty
+tree on the build host).
+
+CI: airos-ci's `build_airdroid` (`apps/build-app-packages.sh`) runs
+`tools/build-all.sh` with `AIRDROID_BUILD`, `AIRDROID_STAGE` and
+`AIRDROID_STAGE_ONLY=1`, then adds the attributes and makes the package;
+`.github/workflows/airos.yml` runs it on every push to `main` and
+publishes the package to the `latest` release and the package pool. The
+package revision is the commit count.
 
 `tools/haiku/env.sh` uses airos-ci's SDK (`/data1/airos/sdk`) and pinned Rust
 nightly (`/data1/airos/toolchain/rust`) with a separate cargo home (the CI's
