@@ -68,11 +68,12 @@ Threadripper (AMD, NVMM's SVM path) with a GTX 1080 Ti:
   growing qcow2). Fixed in haiku 4879942cdc; with it Android's first boot
   leaves a clean disk (e2fsck) in the x86_64 test VM. linuxvm (Docker)
   runs the same QEMU and was exposed to it too.
-* The hang is not explained yet: it may have been the same corruption
-  (BFS metadata), or NVMM's SVM path. Until the X399 has been retested
-  on an image with the BFS fix, airDroid refuses to start on AMD
-  processors (settings `allow_amd: true` overrides it, for testing), and
-  it is not in the images.
+* Retested on hrev60207+2800 (with the BFS fix): four headless NVMM runs
+  (8 vCPUs, Android's first boot, 35-40 s each) and two runs of the app
+  (virgl, Settings scrolled: 333 frames, 0.3-0.6 % janky, median 10-19 ms;
+  boot 28 s on a new disk, 19.8 s on the next start) all left a clean disk
+  (e2fsck) and the computer never hung; the hang came with the corruption.
+  airDroid runs on AMD again and is back in the images.
 
 ## Needs
 

@@ -467,16 +467,6 @@ impl Engine {
             env,
             share,
         };
-        if cfg.accel == Accel::Nvmm && amd_cpu() && !self.settings.allow_amd {
-            // air/OS's NVMM on AMD (SVM, nested paging through RVI) hung the
-            // host and corrupted the guest's disk (2026-11-21); Intel (VMX,
-            // EPT) is the tested path
-            self.phase = Phase::Stopped;
-            let text = "airDroid does not run on AMD processors yet: air/OS's NVMM has a bug there that can freeze the computer.";
-            self.status(text);
-            host::alert("airDroid", &format!("{text}\n\nTo try it anyway (for testing), set \"allow_amd\": true in ~/config/settings/airDroid/settings.json."));
-            return;
-        }
         if cfg.accel == Accel::Tcg {
             self.status("Starting Android (no hardware virtualization: this will be slow)…");
         } else {
@@ -1125,20 +1115,6 @@ impl Engine {
 
 /// Notification ids of install announcements (Android's count up from 1).
 const INSTALL_NOTIFY_ID: u32 = 0x4000_0000;
-
-/// An AMD processor (NVMM uses SVM there).
-fn amd_cpu() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let r = unsafe { std::arch::x86_64::__cpuid(0) };
-        let vendor: Vec<u8> = [r.ebx, r.edx, r.ecx].iter().flat_map(|v| v.to_le_bytes()).collect();
-        vendor == b"AuthenticAMD"
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
-}
 
 fn debug_log(text: &str) {
     if debug() {
