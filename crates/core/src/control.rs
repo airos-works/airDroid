@@ -23,6 +23,8 @@ pub enum Request {
     ShowFullUi,
     Status,
     Stop,
+    /// Newer Android images, if any, then a restart (`waydroid upgrade`).
+    Upgrade,
     SetProp { key: String, value: String },
 }
 

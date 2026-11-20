@@ -7,6 +7,7 @@
 //!   airdroid app intent ACTION [URI]
 //!   airdroid show-full-ui
 //!   airdroid prop get KEY | prop set KEY VALUE
+//!   airdroid upgrade                             newer Android images, then a restart
 //!   airdroid stop
 
 use airdroid_core::control::{call, Request};
@@ -21,7 +22,7 @@ fn usage() -> ! {
     eprintln!(
         "usage: airdroid status | shell [-u UID] [--vm] COMMAND... | logcat [ARGS...]\n\
          \x20      | app install FILE.apk | app remove PACKAGE | app launch PACKAGE | app list\n\
-         \x20      | app intent ACTION [URI] | show-full-ui | prop get KEY | prop set KEY VALUE | stop"
+         \x20      | app intent ACTION [URI] | show-full-ui | prop get KEY | prop set KEY VALUE | upgrade | stop"
     );
     std::process::exit(2)
 }
@@ -38,6 +39,7 @@ fn main() {
     let req = match a.as_slice() {
         ["status"] => Request::Status,
         ["stop"] | ["session", "stop"] => Request::Stop,
+        ["upgrade"] => Request::Upgrade,
         ["show-full-ui"] => Request::ShowFullUi,
         ["shell", rest @ ..] => {
             let mut uid = None;

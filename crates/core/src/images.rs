@@ -196,3 +196,60 @@ pub fn setup(dir: &Path, arch: Arch, flavour: &str, progress: Progress, cancel: 
     progress("Unpacking", 1, 1);
     Ok(inst)
 }
+
+/// `waydroid upgrade`: downloads the newest system/vendor when they are
+/// newer than the installed ones and swaps them in (the running VM keeps
+/// the files it has open). Returns the new state, or None when current.
+pub fn upgrade(dir: &Path, arch: Arch, flavour: &str, progress: Progress, cancel: &Arc<AtomicBool>) -> io::Result<Option<Installed>> {
+    let cur = installed(dir).unwrap_or_default();
+    let system = latest(&system_ota(arch, flavour))?;
+    let vendor = latest(&vendor_ota(arch))?;
+    if system.datetime <= cur.system_datetime && vendor.datetime <= cur.vendor_datetime {
+        return Ok(None);
+    }
+    let dl = dir.join("download");
+    let mut next = cur.clone();
+    if system.datetime > cur.system_datetime {
+        let zip = download(&system, &dl, "Android system", progress, cancel)?;
+        extract(&zip, "system.img", &dl)?;
+        std::fs::rename(dl.join("system.img"), dir.join("system.img"))?;
+        next.system = system.filename;
+        next.system_datetime = system.datetime;
+    }
+    if vendor.datetime > cur.vendor_datetime {
+        let zip = download(&vendor, &dl, "Android vendor", progress, cancel)?;
+        extract(&zip, "vendor.img", &dl)?;
+        std::fs::rename(dl.join("vendor.img"), dir.join("vendor.img"))?;
+        next.vendor = vendor.filename;
+        next.vendor_datetime = vendor.datetime;
+    }
+    let _ = std::fs::remove_dir_all(&dl);
+    std::fs::write(dir.join("installed.json"), serde_json::to_string_pretty(&next).unwrap_or_default())?;
+    Ok(Some(next))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Network: downloads ~1 GB. `cargo test -p airdroid-core -- --ignored`
+    #[test]
+    #[ignore]
+    fn setup_then_upgrade_is_current() {
+        let dir = std::env::temp_dir().join(format!("airdroid-images-{}", std::process::id()));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut last = 0u64;
+        let mut progress = |what: &str, done: u64, total: u64| {
+            if done >= last + (100 << 20) || done == total {
+                eprintln!("{what}: {} / {} MB", done >> 20, total >> 20);
+                last = done;
+            }
+        };
+        let inst = setup(&dir, Arch::host(), "VANILLA", &mut progress, &cancel).expect("setup");
+        assert!(dir.join("system.img").metadata().unwrap().len() > 1 << 30);
+        assert!(dir.join("vendor.img").exists());
+        assert!(inst.system.contains("VANILLA"));
+        assert!(upgrade(&dir, Arch::host(), "VANILLA", &mut progress, &cancel).expect("upgrade").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

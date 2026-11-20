@@ -30,6 +30,8 @@ pub enum Msg {
     GuestGone,
     SetupProgress(String, f32),
     SetupDone(Result<(), String>),
+    /// `airdroid upgrade` finished: (message, images changed)
+    UpgradeDone(Result<bool, String>, Option<UnixStream>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +100,7 @@ pub struct Engine {
     audio: Vec<u32>,
     /// `airdroid` commands waiting for a guest answer, by request id
     waiters: HashMap<u32, UnixStream>,
+    restart_after_stop: bool,
 }
 
 const FRAME: Duration = Duration::from_micros(16_667);
@@ -129,6 +132,7 @@ impl Engine {
             cancel_setup: Arc::new(AtomicBool::new(false)),
             audio: Vec::new(),
             waiters: HashMap::new(),
+            restart_after_stop: false,
         }
     }
 
@@ -160,6 +164,7 @@ impl Engine {
                 Ok(Msg::GuestGone) => self.vm_gone(),
                 Ok(Msg::SetupProgress(text, p)) => host::main_set_status(&text, p),
                 Ok(Msg::SetupDone(r)) => self.setup_done(r),
+                Ok(Msg::UpgradeDone(r, conn)) => self.upgrade_done(r, conn),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
@@ -244,6 +249,31 @@ impl Engine {
                 self.stop_vm();
                 finish(&mut conn, "", 0);
             }
+            R::Upgrade => {
+                if matches!(self.phase, Phase::Downloading | Phase::NotInstalled) {
+                    return finish(&mut conn, "Android is not installed yet", 1);
+                }
+                let _ = control::write_frame(&mut conn, control::OUT, b"Checking for newer Android images...\n");
+                let tx = self.tx.clone();
+                let dir = self.paths.images();
+                let flavour = self.settings.flavour.clone();
+                let cancel = self.cancel_setup.clone();
+                std::thread::spawn(move || {
+                    let mut last = Instant::now();
+                    let tx2 = tx.clone();
+                    let mut progress = |what: &str, done: u64, total: u64| {
+                        if last.elapsed() > Duration::from_millis(500) {
+                            last = Instant::now();
+                            let p = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+                            let _ = tx2.send(Msg::SetupProgress(format!("Updating Android: {what}"), p));
+                        }
+                    };
+                    let r = images::upgrade(&dir, images::Arch::host(), &flavour, &mut progress, &cancel)
+                        .map(|n| n.is_some())
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(Msg::UpgradeDone(r, Some(conn)));
+                });
+            }
             R::Launch { package } if self.phase != Phase::Booted => {
                 self.request(Pending::Launch(package));
                 finish(&mut conn, "Android is starting; the app opens when it is up.", 0);
@@ -318,6 +348,24 @@ impl Engine {
                 self.phase = Phase::NotInstalled;
                 host::main_set_status(&format!("Could not download Android: {e}"), -1.0);
             }
+        }
+    }
+
+    fn upgrade_done(&mut self, r: Result<bool, String>, conn: Option<UnixStream>) {
+        let (text, code) = match r {
+            Ok(true) => ("Android was updated; it restarts now.".to_string(), 0),
+            Ok(false) => ("Android is up to date.".to_string(), 0),
+            Err(e) => (format!("Updating Android failed: {e}"), 1),
+        };
+        host::main_set_status(&text, -1.0);
+        if let Some(mut c) = conn {
+            let _ = control::write_frame(&mut c, if code == 0 { control::OUT } else { control::ERR }, format!("{text}\n").as_bytes());
+            let _ = control::write_frame(&mut c, control::EXIT, &(code as i32).to_le_bytes());
+        }
+        if text.starts_with("Android was updated") && self.session.is_some() {
+            // restart on the new images once the old VM is gone
+            self.restart_after_stop = true;
+            self.stop_vm();
         }
     }
 
@@ -462,6 +510,9 @@ impl Engine {
             self.phase = Phase::Stopped;
         }
         self.status("Android is stopped.");
+        if std::mem::take(&mut self.restart_after_stop) && !self.quitting {
+            self.start_vm();
+        }
     }
 
     // ---- requests --------------------------------------------------------
