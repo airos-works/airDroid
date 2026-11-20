@@ -57,13 +57,15 @@
 
 * Vulkan on the GPU (Venus): see the plan below; Android's Vulkan is
   lavapipe (CPU) under virgl, SwiftShader otherwise.
-* Audio input (microphone), camera, sensors, notifications to the desktop.
+* Camera and sensors (Waydroid has neither either).
+* Toasts and system dialogs in multi-window mode: they belong to no app's
+  task, so (as in Waydroid) no window shows them; crash and "not
+  responding" dialogs are turned off there so they cannot hold the focus.
 * ARM64 (Waydroid's arm64 images and QEMU under TCG would work but slowly;
   no NVMM there).
-* Window resizing in multi-window mode (Android's caption moves windows;
-  resizing them from air/OS is not wired).
-* Performance on real hardware is unmeasured (the X399 went down with the
-  NVMM kernel bug this work found; see haiku 353344194f).
+* Verified only in a VM so far: GPU rendering on a real GPU, a real
+  microphone, and performance (boot time, frame rate) on hardware. The
+  X399 still runs a kernel without haiku 353344194f (2026-11-21).
 
 ## GPU plan
 
