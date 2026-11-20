@@ -194,6 +194,7 @@ public:
 			B_WILL_DRAW | B_FRAME_EVENTS | B_NAVIGABLE),
 		fId(id),
 		fBitmap(NULL),
+		fFront(0),
 		fCursorHidden(false),
 		fBorderless(false),
 		fResizeEdges(0),
@@ -206,6 +207,46 @@ public:
 	~AndroidView()
 	{
 		delete fBitmap;
+		delete fFrames[0];
+		delete fFrames[1];
+	}
+
+	/*!	Double-buffered frames: the back bitmap of \a width x \a height
+		(packed B_RGB32 rows) for the engine to compose into without the
+		window locked, then EndFrame() makes it the front one. BeginFrame()
+		syncs with app_server first, so it is done with a bitmap before we
+		write into it again. Called with the window locked. */
+	uint32* BeginFrame(int32 width, int32 height)
+	{
+		for (int i = 0; i < 2; i++) {
+			if (fFrames[i] == NULL
+				|| fFrames[i]->Bounds().IntegerWidth() + 1 != width
+				|| fFrames[i]->Bounds().IntegerHeight() + 1 != height) {
+				delete fFrames[i];
+				fFrames[i] = new BBitmap(BRect(0, 0, width - 1, height - 1), 0,
+					B_RGB32);
+				if (fFrames[i]->InitCheck() != B_OK
+					|| fFrames[i]->BytesPerRow() != width * 4) {
+					delete fFrames[i];
+					fFrames[i] = NULL;
+					return NULL;
+				}
+			}
+		}
+		delete fBitmap;
+		fBitmap = NULL;
+		// app_server must be done drawing the back bitmap (it was the front
+		// one last time): what we sent it so far is handled before this
+		// returns. (Not from Draw(): inside an update app_server answers it
+		// only after the update, which waits for Draw().)
+		Sync();
+		return (uint32*)fFrames[1 - fFront]->Bits();
+	}
+
+	void EndFrame()
+	{
+		fFront = 1 - fFront;
+		Invalidate();
 	}
 
 	// Called with the window locked.
@@ -233,10 +274,11 @@ public:
 	virtual void Draw(BRect updateRect)
 	{
 		BRect painted;
-		if (fBitmap != NULL) {
-			painted = fBitmap->Bounds() & updateRect;
+		BBitmap* bitmap = fFrames[fFront] != NULL ? fFrames[fFront] : fBitmap;
+		if (bitmap != NULL) {
+			painted = bitmap->Bounds() & updateRect;
 			if (painted.IsValid())
-				DrawBitmapAsync(fBitmap, painted, painted);
+				DrawBitmapAsync(bitmap, painted, painted);
 		}
 		SetHighColor(0, 0, 0);
 		BRegion rest(updateRect);
@@ -447,6 +489,8 @@ public:
 private:
 	uint32		fId;
 	BBitmap*	fBitmap;
+	BBitmap*	fFrames[2] = { NULL, NULL };
+	int			fFront;
 	bool		fCursorHidden;
 	bool		fBorderless;
 	uint32		fResizeEdges;
@@ -1304,6 +1348,31 @@ ad_window_move(uint32 id, int32 x, int32 y)
 	if (w == NULL)
 		return;
 	w->MoveTo(x, y);
+	w->Unlock();
+}
+
+
+/*! The back bitmap of window \a id for a \a width x \a height frame
+	(packed B_RGB32 rows), or NULL; ad_window_frame_end() shows it. */
+uint32*
+ad_window_frame_begin(uint32 id, int32 width, int32 height)
+{
+	AndroidWindow* w = LockWindow(id);
+	if (w == NULL)
+		return NULL;
+	uint32* bits = w->View()->BeginFrame(width, height);
+	w->Unlock();
+	return bits;
+}
+
+
+void
+ad_window_frame_end(uint32 id)
+{
+	AndroidWindow* w = LockWindow(id);
+	if (w == NULL)
+		return;
+	w->View()->EndFrame();
 	w->Unlock();
 }
 

@@ -83,6 +83,8 @@ mod ffi {
         pub fn ad_window_close(id: u32);
         pub fn ad_window_set_title(id: u32, title: *const libc::c_char);
         pub fn ad_window_resize(id: u32, w: i32, h: i32);
+        pub fn ad_window_frame_begin(id: u32, width: i32, height: i32) -> *mut u32;
+        pub fn ad_window_frame_end(id: u32);
         pub fn ad_window_present(id: u32, pixels: *const u32, w: i32, h: i32);
         pub fn ad_window_activate(id: u32);
         pub fn ad_window_hide_cursor(id: u32, hidden: i32);
@@ -180,6 +182,17 @@ mod imp {
     }
     pub fn window_resize(id: u32, w: u32, h: u32) {
         unsafe { ffi::ad_window_resize(id, w as i32, h as i32) }
+    }
+    /// Composes a frame straight into the window's back bitmap (`f` gets
+    /// its w*h pixels) and shows it; false when there is no bitmap.
+    pub fn window_frame(id: u32, w: u32, h: u32, f: impl FnOnce(&mut [u32])) -> bool {
+        let p = unsafe { ffi::ad_window_frame_begin(id, w as i32, h as i32) };
+        if p.is_null() {
+            return false;
+        }
+        f(unsafe { std::slice::from_raw_parts_mut(p, w as usize * h as usize) });
+        unsafe { ffi::ad_window_frame_end(id) };
+        true
     }
     pub fn window_present(id: u32, pixels: &[u32], w: u32, h: u32) {
         debug_assert!(pixels.len() >= (w * h) as usize);
@@ -307,6 +320,9 @@ mod imp {
     pub fn window_close(id: u32) {}
     pub fn window_set_title(id: u32, title: &str) {}
     pub fn window_resize(id: u32, w: u32, h: u32) {}
+    pub fn window_frame(id: u32, w: u32, h: u32, f: impl FnOnce(&mut [u32])) -> bool {
+        false
+    }
     pub fn window_present(id: u32, pixels: &[u32], w: u32, h: u32) {}
     pub fn window_activate(id: u32) {}
     pub fn window_hide_cursor(id: u32, hidden: bool) {}

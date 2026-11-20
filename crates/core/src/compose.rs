@@ -148,7 +148,8 @@ impl Canvas {
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
-        if (w, h) != (self.width, self.height) {
+        // (compose_into() sets the size without the pixels)
+        if (w, h) != (self.width, self.height) || self.pixels.len() < w as usize * h as usize {
             self.width = w;
             self.height = h;
             self.pixels = vec![0xff00_0000; w as usize * h as usize];
@@ -164,6 +165,27 @@ impl Canvas {
     /// Like `compose`, for the part of the window whose top left corner is
     /// at (`ox`, `oy`) in window coordinates (the canvas is that part).
     pub fn compose_at(&mut self, layers: &[Layer], buffers: &HashMap<u32, Buffer>, ox: i32, oy: i32) -> Rect {
+        let mut pixels = std::mem::take(&mut self.pixels);
+        let r = self.compose_into(&mut pixels, self.width, self.height, layers, buffers, ox, oy);
+        self.pixels = pixels;
+        r
+    }
+
+    /// Like `compose_at`, into `out` (`width` x `height` pixels, rows packed:
+    /// a window's bitmap), instead of the canvas's own pixels.
+    pub fn compose_into(
+        &mut self,
+        out: &mut [u32],
+        width: u32,
+        height: u32,
+        layers: &[Layer],
+        buffers: &HashMap<u32, Buffer>,
+        ox: i32,
+        oy: i32,
+    ) -> Rect {
+        assert!(out.len() >= width as usize * height as usize);
+        self.width = width;
+        self.height = height;
         let full = Rect::new(0, 0, self.width as i32, self.height as i32);
         let shifted: Vec<Layer>;
         let layers = if ox != 0 || oy != 0 {
@@ -201,32 +223,32 @@ impl Canvas {
         let layers = match first {
             Some(i) => &layers[i..],
             None => {
-                self.pixels.fill(0xff00_0000);
+                out[..width as usize * height as usize].fill(0xff00_0000);
                 layers
             }
         };
         for l in layers {
             if l.buffer == u32::MAX {
                 // solid colour (src.x carries ARGB, premultiplied)
-                self.fill(l.dst.intersect(&full), l.src.x as u32);
+                self.fill(out, l.dst.intersect(&full), l.src.x as u32);
                 continue;
             }
             let Some(b) = buffers.get(&l.buffer) else { continue };
             if !b.valid {
                 continue;
             }
-            self.draw(l, b, &full);
+            self.draw(out, l, b, &full);
         }
         full
     }
 
-    fn fill(&mut self, r: Rect, color: u32) {
+    fn fill(&mut self, out: &mut [u32], r: Rect, color: u32) {
         if r.is_empty() {
             return;
         }
         let w = self.width as usize;
         for y in r.y..r.y + r.h {
-            let row = &mut self.pixels[y as usize * w + r.x as usize..y as usize * w + (r.x + r.w) as usize];
+            let row = &mut out[y as usize * w + r.x as usize..y as usize * w + (r.x + r.w) as usize];
             if color >> 24 == 0xff {
                 row.fill(color);
             } else {
@@ -237,7 +259,7 @@ impl Canvas {
         }
     }
 
-    fn draw(&mut self, l: &Layer, b: &Buffer, full: &Rect) {
+    fn draw(&mut self, out: &mut [u32], l: &Layer, b: &Buffer, full: &Rect) {
         let clip = l.dst.intersect(full);
         if clip.is_empty() || l.src.w <= 0 || l.src.h <= 0 {
             return;
@@ -266,7 +288,7 @@ impl Canvas {
             for y in clip.y..clip.y + clip.h {
                 let sy = (src.y + (y - l.dst.y)) as usize;
                 let start = y as usize * w + clip.x as usize;
-                let dst_row = &mut self.pixels[start..start + n];
+                let dst_row = &mut out[start..start + n];
                 let bytes = unsafe { std::slice::from_raw_parts_mut(dst_row.as_mut_ptr() as *mut u8, n * 4) };
                 b.read(sy * b.stride as usize + x0 * 4, bytes);
                 if swap_rb {
@@ -298,7 +320,7 @@ impl Canvas {
                 let bytes = unsafe { std::slice::from_raw_parts_mut(conv.as_mut_ptr() as *mut u8, n * 4) };
                 b.read(sy * b.stride as usize + x0 * 4, bytes);
                 let start = y as usize * w + clip.x as usize;
-                let dst_row = &mut self.pixels[start..start + n];
+                let dst_row = &mut out[start..start + n];
                 let row = &conv[..n];
                 // rows that are opaque throughout (all of a window's but its
                 // shadow's) are copied; this check and that copy vectorize
@@ -344,7 +366,7 @@ impl Canvas {
                 self.conv = conv;
                 last_sy = sy;
             }
-            let dst_row = &mut self.pixels[y as usize * w..(y as usize + 1) * w];
+            let dst_row = &mut out[y as usize * w..(y as usize + 1) * w];
             for x in clip.x..clip.x + clip.w {
                 let si = if scaled {
                     ((x - l.dst.x) as usize * src.w as usize) / l.dst.w as usize

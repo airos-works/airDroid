@@ -761,9 +761,19 @@ impl Engine {
                             }
                         }
                         w.shown = Some(area);
-                        w.canvas.resize(area.w as u32, area.h as u32);
-                        w.canvas.compose_at(&layers, &self.buffers, area.x, area.y);
-                        host::window_present(window, &w.canvas.pixels, area.w as u32, area.h as u32);
+                        // straight into the window's bitmap; through the canvas
+                        // only if there is none
+                        let (aw, ah) = (area.w as u32, area.h as u32);
+                        let canvas = &mut w.canvas;
+                        let buffers = &self.buffers;
+                        let shown = host::window_frame(window, aw, ah, |out| {
+                            canvas.compose_into(out, aw, ah, &layers, buffers, area.x, area.y);
+                        });
+                        if !shown {
+                            w.canvas.resize(aw, ah);
+                            w.canvas.compose_at(&layers, &self.buffers, area.x, area.y);
+                            host::window_present(window, &w.canvas.pixels, aw, ah);
+                        }
                     }
                 }
                 self.frames_done.push((window, serial));
