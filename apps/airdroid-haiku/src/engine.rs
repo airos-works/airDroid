@@ -676,6 +676,9 @@ impl Engine {
             ToHost::BufferNew { id, width, height, stride, format, ranges } => {
                 if let Some(mem) = &self.mem {
                     let b = Buffer::new(mem, width, height, stride, format, &ranges);
+                    if debug() && id % 50 == 0 {
+                        eprintln!("airDroid: buffer {id} {width}x{height} stride {stride} format {format:#x} in {} ranges", ranges.len());
+                    }
                     if !b.valid && debug() {
                         eprintln!("airDroid: buffer {id} {width}x{height} not in guest RAM: {:?}", &ranges[..ranges.len().min(4)]);
                     }
