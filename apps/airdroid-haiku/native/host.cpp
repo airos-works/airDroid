@@ -55,6 +55,7 @@
 #include <View.h>
 #include <Window.h>
 
+#include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <map>
@@ -905,6 +906,10 @@ private:
 // #pragma mark - application
 
 
+// Set by ad_host_quit(): the application may quit now.
+static std::atomic<bool> sQuitAllowed(false);
+
+
 class AdApp : public BApplication {
 public:
 	AdApp(const char* signature)
@@ -936,6 +941,9 @@ public:
 
 	virtual bool QuitRequested()
 	{
+		// the engine stops Android first, then quits through ad_host_quit()
+		if (sQuitAllowed)
+			return true;
 		Push(MakeEvent(AD_QUIT, 0));
 		return false;
 	}
@@ -1167,10 +1175,11 @@ ad_host_quit(void)
 		sMain->Quit();
 		sMain = NULL;
 	}
+	// Not Lock() and Quit() from this thread: BApplication::Quit() from
+	// another thread posts _QUIT_ and keeps the caller's lock, so the
+	// looper could never handle it.
+	sQuitAllowed = true;
 	BMessenger(sApp).SendMessage(B_QUIT_REQUESTED);
-	// AdApp::QuitRequested refuses: quit the looper directly
-	if (sApp->Lock())
-		sApp->Quit();
 }
 
 

@@ -63,6 +63,25 @@ fn kernel_release() -> String {
 }
 
 fn poweroff() -> ! {
+    unsafe { libc::sync() };
+    // Leave Android's data disk clean (no journal replay on the next start,
+    // nothing written after the devices stop): what is mounted on it
+    // (system/vendor overlays, the shared folder, Android's mounts) goes
+    // first, then it is remounted read-only.
+    let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+    let points: Vec<&str> = mounts.lines().filter_map(|l| l.split(' ').nth(1)).collect();
+    for p in points.iter().rev() {
+        if *p != container::DATA_DISK && (p.starts_with(container::ROOT) || p.starts_with(&format!("{}/", container::DATA_DISK))) {
+            let _ = sys::umount_lazy(p);
+        }
+    }
+    let target = sys::cstr(container::DATA_DISK);
+    let r = unsafe {
+        libc::mount(std::ptr::null(), target.as_ptr(), std::ptr::null(), libc::MS_REMOUNT | libc::MS_RDONLY, std::ptr::null())
+    };
+    if r != 0 {
+        logf!("data disk stays writable: {}", std::io::Error::last_os_error());
+    }
     unsafe {
         libc::sync();
         libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF);

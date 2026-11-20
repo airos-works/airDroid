@@ -28,6 +28,8 @@ pub enum Msg {
     Control(control::Request, UnixStream),
     Guest(ToHost),
     GuestGone,
+    /// The stop thread saw QEMU exit (or killed it).
+    QemuExited,
     SetupProgress(String, f32),
     SetupDone(Result<(), String>),
     /// `airdroid upgrade` finished: (message, images changed)
@@ -99,6 +101,9 @@ pub struct Engine {
     install_baseline: Option<Vec<String>>,
     app_path: String,
     quitting: bool,
+    /// QEMU runs (its handle may be with the stop thread): quitting waits
+    /// for it, so the app never leaves a VM behind.
+    qemu_alive: bool,
     epoch: Instant,
     cancel_setup: Arc<AtomicBool>,
     /// open audio streams (the host plays them; credits go back)
@@ -136,6 +141,7 @@ impl Engine {
             announce_new_apps: false,
             install_baseline: None,
             quitting: false,
+            qemu_alive: false,
             epoch: Instant::now(),
             cancel_setup: Arc::new(AtomicBool::new(false)),
             audio: Vec::new(),
@@ -171,6 +177,10 @@ impl Engine {
                 Ok(Msg::Control(req, conn)) => self.control(req, conn),
                 Ok(Msg::Guest(m)) => self.guest_message(m),
                 Ok(Msg::GuestGone) => self.vm_gone(),
+                Ok(Msg::QemuExited) => {
+                    self.qemu_alive = false;
+                    self.vm_gone();
+                }
                 Ok(Msg::SetupProgress(text, p)) => host::main_set_status(&text, p),
                 Ok(Msg::SetupDone(r)) => self.setup_done(r),
                 Ok(Msg::UpgradeDone(r, conn)) => self.upgrade_done(r, conn),
@@ -180,7 +190,9 @@ impl Engine {
             self.vsync();
             self.audio_credits();
             self.microphones();
-            if self.quitting && self.child.is_none() {
+            // quit once Android is down (the stop thread reports QEMU gone,
+            // killing it after 15 s)
+            if self.quitting && self.child.is_none() && !self.qemu_alive {
                 break;
             }
         }
@@ -467,9 +479,12 @@ impl Engine {
                 return;
             }
         };
+        let mut child = child;
         let (session, rx) = match Session::connect(&cfg.socket(), Duration::from_secs(30)) {
             Ok(v) => v,
             Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
                 self.status(&format!("The Android VM did not come up: {e} (see {})", cfg.qemu_log().display()));
                 return;
             }
@@ -484,6 +499,7 @@ impl Engine {
             let _ = tx.send(Msg::GuestGone);
         });
         self.child = Some(child);
+        self.qemu_alive = true;
         self.session = Some(session);
         self.vm = Some(cfg);
         self.phase = Phase::Starting;
@@ -509,10 +525,16 @@ impl Engine {
                     let _ = c.kill();
                     let _ = c.wait();
                 }
-                let _ = tx.send(Msg::GuestGone);
+                let _ = tx.send(Msg::QemuExited);
             });
-        } else if self.quitting {
-            self.child = None;
+        } else if let Some(mut c) = self.child.take() {
+            // QEMU is still starting (no guest to ask yet): dropping the
+            // handle would leave it running, so end it
+            self.status("Stopping Android…");
+            let _ = c.kill();
+            let _ = c.wait();
+            self.qemu_alive = false;
+            self.vm_gone();
         }
     }
 
@@ -520,6 +542,7 @@ impl Engine {
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
             let _ = c.wait();
+            self.qemu_alive = false;
         }
         self.session = None;
         self.mem = None;
@@ -1082,11 +1105,8 @@ impl Engine {
             kind::QUIT => {
                 self.quitting = true;
                 self.cancel_setup.store(true, std::sync::atomic::Ordering::Relaxed);
-                if self.session.is_some() {
-                    self.stop_vm();
-                } else {
-                    self.child = None;
-                }
+                // stop_vm also ends a QEMU that is still starting
+                self.stop_vm();
             }
             _ => {}
         }
