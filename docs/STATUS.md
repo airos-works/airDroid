@@ -17,9 +17,22 @@
 * Clipboard both ways (implemented; not yet verified on air/OS).
 * `airdroid` command: status, shell, logcat, app …, prop, stop.
 
+* GPU rendering, phase 1 (virgl): Android's GL goes through Mesa's virgl
+  driver to virglrenderer in airDroid's QEMU, on the host's GPU through
+  EGL (AMD: radeonsi; NVIDIA: Zink on NVK; no GPU: llvmpipe). Frames are
+  read back into guest pages and shown as before. `gpu` setting:
+  auto (virgl when there is a GPU), virgl, none (SwiftShader).
+  Verified in the test VM with llvmpipe; not yet on GPU hardware.
+
+## Needs
+
+* air/OS with haiku 353344194f (NVMM page-protection fix), i.e. images from
+  2026-11-20 23:48 on. Older kernels panic as soon as Android boots.
+
 ## Not yet
 
-* GPU acceleration: Android renders with SwiftShader (CPU). Plan below.
+* Vulkan on the GPU (Venus): see the plan below; Android's Vulkan is
+  lavapipe (CPU) under virgl, SwiftShader otherwise.
 * Audio input (microphone), camera, sensors, notifications to the desktop.
 * ARM64 (Waydroid's arm64 images and QEMU under TCG would work but slowly;
   no NVMM there).
@@ -30,12 +43,13 @@
 
 ## GPU plan
 
-1. Venus: Android's `vulkan.virtio` (in Waydroid's vendor image) with a
-   virtio-gpu device whose host side is virglrenderer's Venus renderer on
-   air/OS's RADV/NVK. Needs virglrenderer ported to air/OS (Vulkan only,
-   no EGL/GBM) and blob resources mapped into guest memory.
-2. GLES over Venus with Mesa's Zink in the guest, or ANGLE (Android's
-   `ro.hardware.egl=angle` on Vulkan).
-3. Display: gralloc buffers become virtio-gpu blobs; the host imports them
-   into Vulkan and presents with the Craft apps' readback/scanout path,
-   instead of the CPU copy.
+1. Done: virgl (GL) through virglrenderer on EGL, frames read back.
+2. Venus (Vulkan): Waydroid's vendor image has `vulkan.virtio`; the host
+   side is virglrenderer's Venus on RADV/NVK. Blocker: Venus maps host
+   GPU memory into the guest (virtio-gpu blob/hostmem), and NVMM on
+   air/OS replaces a mapped region with its own memory object instead of
+   mapping the existing pages. Needs the NVMM driver to map an existing
+   area's cache into the guest.
+3. Zero-copy display: present virtio-gpu resources straight from the
+   host's GL/Vulkan instead of reading them back (needs the resources'
+   textures shared between QEMU and the airDroid app, or QEMU presenting).
