@@ -58,18 +58,30 @@ fn launcher_activity(package: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{package} has no launcher activity"))
 }
 
-/// Android's display must be awake to draw anything (it sleeps after its
-/// screen-off timeout, and then composes black).
-fn wake() {
-    let _ = shell_user(&["/system/bin/input", "keyevent", "KEYCODE_WAKEUP"]);
+/// Android set up for a desktop, after each boot:
+/// * the display stays on (air/OS does screen saving; Android's own timeout
+///   would make its windows go black),
+/// * no lock screen, and the notification shade collapsed: in multi-window
+///   mode neither is shown, but either takes the input focus,
+/// * no on-screen keyboard while there is a hardware one.
+pub fn prepare_desktop() {
+    for argv in [
+        &["/system/bin/settings", "put", "system", "screen_off_timeout", "2147483647"][..],
+        &["/system/bin/svc", "power", "stayon", "true"],
+        &["/system/bin/settings", "put", "secure", "show_ime_with_hard_keyboard", "0"],
+        &["/system/bin/locksettings", "set-disabled", "true"],
+    ] {
+        let _ = shell_user(argv);
+    }
+    wake();
 }
 
-/// A desktop window has no business going dark on Android's timer: keep
-/// the display on (air/OS does screen saving).
-pub fn keep_awake() {
-    let _ = shell_user(&["/system/bin/settings", "put", "system", "screen_off_timeout", "2147483647"]);
-    let _ = shell_user(&["/system/bin/svc", "power", "stayon", "true"]);
-    wake();
+/// Brings Android's focus to the apps: wakes the display, dismisses the
+/// keyguard and collapses the (invisible) notification shade.
+fn wake() {
+    let _ = shell_user(&["/system/bin/input", "keyevent", "KEYCODE_WAKEUP"]);
+    let _ = shell_user(&["/system/bin/wm", "dismiss-keyguard"]);
+    let _ = shell_user(&["/system/bin/cmd", "statusbar", "collapse"]);
 }
 
 fn run(link: &HostLink, action: Action) -> Result<String, String> {
@@ -91,7 +103,11 @@ fn run(link: &HostLink, action: Action) -> Result<String, String> {
         Action::Launch(package) => {
             let activity = launcher_activity(&package)?;
             let _ = exec::setprop("waydroid.active_apps", &package);
-            shell_user(&["/system/bin/am", "start", "-n", &activity, "-f", "0x10000000"])
+            let r = shell_user(&["/system/bin/am", "start", "-n", &activity, "-f", "0x10000000"]);
+            // SystemUI's shade takes the focus again as the app comes up
+            std::thread::sleep(Duration::from_millis(500));
+            let _ = shell_user(&["/system/bin/cmd", "statusbar", "collapse"]);
+            r
         }
         Action::FullUi => {
             let _ = exec::setprop("waydroid.active_apps", "Waydroid");

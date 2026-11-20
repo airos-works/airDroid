@@ -58,6 +58,9 @@ struct Win {
     /// inside a display-sized surface); None until something is visible,
     /// and the BWindow opens then.
     shown: Option<Rect>,
+    /// bounds seen before the window opened (it opens once they hold for
+    /// two frames: an app's first frame can sit at the display's corner)
+    candidate: Option<Rect>,
     buttons: i32,
     touching: bool,
 }
@@ -566,9 +569,11 @@ impl Engine {
             ToHost::BufferDestroy { id } => {
                 self.buffers.remove(&id);
             }
+            ToHost::WindowNew { id, title, app_id, .. } if debug() && { eprintln!("airDroid: window {id} new '{title}' ({app_id})"); false } => {}
+            ToHost::WindowDestroy { id } if debug() && { eprintln!("airDroid: window {id} destroyed"); false } => {}
             ToHost::WindowNew { id, title, app_id, .. } => {
                 let title = window_title(&title, &app_id, &self.apps);
-                self.windows.insert(id, Win { canvas: Canvas::new(), crop: None, title, shown: None, buttons: 0, touching: false });
+                self.windows.insert(id, Win { canvas: Canvas::new(), crop: None, title, shown: None, candidate: None, buttons: 0, touching: false });
             }
             ToHost::WindowUpdate { id, title, app_id, .. } => {
                 let t = window_title(&title, &app_id, &self.apps);
@@ -611,7 +616,18 @@ impl Engine {
                     } else {
                         Some(full)
                     };
-                    if let Some(area) = area.filter(|a| !a.is_empty()) {
+                    let settled = match (w.shown, area) {
+                        (None, Some(a)) if multi => {
+                            let ok = w.candidate == Some(a);
+                            w.candidate = Some(a);
+                            ok
+                        }
+                        _ => true,
+                    };
+                    if let Some(area) = area.filter(|a| !a.is_empty() && settled) {
+                        if debug() && w.shown != Some(area) {
+                            eprintln!("airDroid: window {window} shows {area:?}");
+                        }
                         match w.shown {
                             None => host::window_open(window, &w.title, multi.then_some((area.x, area.y)), area.w as u32, area.h as u32, multi),
                             Some(old) => {
@@ -804,6 +820,7 @@ impl Engine {
                     discrete_y: ev.dy.round() as i32,
                 });
             }
+            kind::KEY_DOWN | kind::KEY_UP if debug() && { eprintln!("airDroid: key {} raw {:#x} -> {:?} (window {win})", if ev.kind == kind::KEY_DOWN { "down" } else { "up" }, ev.key, keys::linux_key(ev.key)); false } => {}
             kind::KEY_DOWN | kind::KEY_UP => {
                 if let Some(code) = keys::linux_key(ev.key) {
                     // Android repeats keys itself
