@@ -24,6 +24,9 @@ pub struct Settings {
     /// The folder shared with Android (as /sdcard/airOS); "~/" is the home
     /// folder, empty shares nothing.
     pub shared_folder: String,
+    /// Start Android on AMD processors anyway (NVMM's SVM path has a known
+    /// host-freezing bug; for testing it).
+    pub allow_amd: bool,
 }
 
 impl Default for Settings {
@@ -40,6 +43,7 @@ impl Default for Settings {
             mouse_as_touch: false,
             gpu: "auto".into(),
             shared_folder: "~/Android".into(),
+            allow_amd: false,
         }
     }
 }

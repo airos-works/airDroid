@@ -48,6 +48,25 @@
 * `airdroid upgrade`: newer Android images from the OTA channels, then a
   restart (Android's data stays).
 
+## On real hardware (X399, 2026-11-21, hrev60207+2797)
+
+Threadripper (AMD, NVMM's SVM path) with a GTX 1080 Ti:
+
+* Android booted in 32 s (about 300 s in the nested test VM).
+* GPU: QEMU's GL was Summit's Mesa, Zink on NVK; virgl rendered Android
+  correctly. Scrolling Settings: 330 frames in about 5 s, 0.3 % janky,
+  median frame 9 ms (GPU 6 ms), 99th percentile 25 ms; the host presented
+  about 65 frames a second.
+* Quit with Android booted: 2 s, nothing left behind.
+* **Blocker:** the first session left Android's data disk (ext4 in the
+  qcow2) corrupt (an inode table and a directory block lost; qcow2 itself
+  consistent), and the next test boot hung the whole computer (no ping, no
+  syslog). Every earlier test ran NVMM's VMX/EPT path (Intel hosts); the
+  suspect is NVMM's SVM/RVI path (nested page invalidation). Until it is
+  fixed airDroid refuses to start on AMD processors (settings
+  `allow_amd: true` overrides it, for testing), and it is not in the
+  images.
+
 ## Needs
 
 * air/OS with haiku 353344194f (NVMM page-protection fix), i.e. images from
@@ -63,9 +82,9 @@
   responding" dialogs are turned off there so they cannot hold the focus.
 * ARM64 (Waydroid's arm64 images and QEMU under TCG would work but slowly;
   no NVMM there).
-* Verified only in a VM so far: GPU rendering on a real GPU, a real
-  microphone, and performance (boot time, frame rate) on hardware. The
-  X399 still runs a kernel without haiku 353344194f (2026-11-21).
+* AMD hosts: see "On real hardware" above.
+* Not yet verified on hardware: a real microphone, and any Intel machine
+  (the VMX/EPT path is verified only in nested VMs).
 
 ## GPU plan
 
