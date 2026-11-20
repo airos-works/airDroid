@@ -24,6 +24,13 @@
   auto (virgl when there is a GPU), virgl, none (SwiftShader).
   Verified in the test VM with llvmpipe; not yet on GPU hardware.
 
+* Notifications: Android's notifications show on the air/OS desktop
+  (BNotification with the app's name and icon; clicking one starts the
+  app). airDroid serves Waydroid's `waydroidnotifications` binder service
+  from the VM, which LineageOS's Waydroid build posts to.
+* `airdroid upgrade`: newer Android images from the OTA channels, then a
+  restart (Android's data stays).
+
 ## Needs
 
 * air/OS with haiku 353344194f (NVMM page-protection fix), i.e. images from

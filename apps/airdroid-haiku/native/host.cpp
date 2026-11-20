@@ -33,6 +33,8 @@
 #include <Messenger.h>
 #include <Mime.h>
 #include <NodeInfo.h>
+#include <Notification.h>
+#include <String.h>
 #include <Path.h>
 #include <Region.h>
 #include <Roster.h>
@@ -1250,6 +1252,49 @@ ad_audio_close(uint32 id)
 	a->player->Stop();
 	delete a->player;
 	delete a;
+}
+
+
+/*! An Android notification on the desktop. `image` is GLib image-data
+	(RGB or RGBA rows) or NULL; then `png` (the app's icon) if any. A click
+	starts the app. */
+void
+ad_notify(uint32 id, const char* app, const char* package, const char* title,
+	const char* body, const uint8* image, int32 width, int32 height,
+	int32 rowstride, int hasAlpha, const uint8* png, size_t pngLength)
+{
+	BNotification n(B_INFORMATION_NOTIFICATION);
+	n.SetGroup(app);
+	n.SetTitle(title);
+	n.SetContent(body);
+	BString mid;
+	mid << "airdroid-" << id;
+	n.SetMessageID(mid);
+	n.SetOnClickApp("application/x-vnd.airos-airDroid");
+	n.AddOnClickArg("--launch");
+	n.AddOnClickArg(package);
+	BBitmap* icon = NULL;
+	if (image != NULL && width > 0 && height > 0) {
+		icon = new BBitmap(BRect(0, 0, width - 1, height - 1), B_RGBA32);
+		uint8* dst = (uint8*)icon->Bits();
+		int32 bpr = icon->BytesPerRow();
+		int32 bpp = hasAlpha ? 4 : 3;
+		for (int32 y = 0; y < height; y++) {
+			const uint8* s = image + (size_t)y * rowstride;
+			uint8* d = dst + (size_t)y * bpr;
+			for (int32 x = 0; x < width; x++) {
+				d[x * 4 + 0] = s[x * bpp + 2];
+				d[x * 4 + 1] = s[x * bpp + 1];
+				d[x * 4 + 2] = s[x * bpp + 0];
+				d[x * 4 + 3] = hasAlpha ? s[x * bpp + 3] : 255;
+			}
+		}
+	} else
+		icon = DecodeImage(png, pngLength);
+	if (icon != NULL && icon->InitCheck() == B_OK)
+		n.SetIcon(icon);
+	n.Send();
+	delete icon;
 }
 
 

@@ -104,6 +104,20 @@ mod ffi {
         pub fn ad_audio_write(id: u32, data: *const u8, len: usize);
         pub fn ad_audio_take_consumed(id: u32) -> u64;
         pub fn ad_audio_close(id: u32);
+        pub fn ad_notify(
+            id: u32,
+            app: *const libc::c_char,
+            package: *const libc::c_char,
+            title: *const libc::c_char,
+            body: *const libc::c_char,
+            image: *const u8,
+            width: i32,
+            height: i32,
+            rowstride: i32,
+            has_alpha: i32,
+            png: *const u8,
+            png_len: usize,
+        );
     }
 }
 
@@ -228,6 +242,16 @@ mod imp {
     pub fn audio_close(id: u32) {
         unsafe { ffi::ad_audio_close(id) }
     }
+    pub fn notify(id: u32, app: &str, package: &str, title: &str, body: &str, image: Option<&airdroid_core::proto::NotifyImage>, png: Option<&[u8]>) {
+        let (ip, w, h, rs, a) = match image {
+            Some(i) if i.data.len() >= (i.rowstride as usize) * (i.height as usize) => (i.data.as_ptr(), i.width as i32, i.height as i32, i.rowstride as i32, i.has_alpha as i32),
+            _ => (std::ptr::null(), 0, 0, 0, 0),
+        };
+        let (pp, pl) = png.map_or((std::ptr::null(), 0), |p| (p.as_ptr(), p.len()));
+        unsafe {
+            ffi::ad_notify(id, c(app).as_ptr(), c(package).as_ptr(), c(title).as_ptr(), c(body).as_ptr(), ip, w, h, rs, a, pp, pl)
+        }
+    }
     pub fn screen_size() -> (u32, u32) {
         let (mut w, mut h) = (0, 0);
         unsafe { ffi::ad_screen_size(&mut w, &mut h) };
@@ -282,6 +306,9 @@ mod imp {
         0
     }
     pub fn audio_close(id: u32) {}
+    pub fn notify(id: u32, app: &str, package: &str, title: &str, body: &str, image: Option<&airdroid_core::proto::NotifyImage>, png: Option<&[u8]>) {
+        eprintln!("notification {id} {app}: {title}: {body}");
+    }
     pub fn screen_size() -> (u32, u32) {
         (1920, 1080)
     }

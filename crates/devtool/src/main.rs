@@ -205,6 +205,11 @@ fn main() {
                     }
                 }
                 ToHost::Clipboard { text } => eprintln!("dev: clipboard: {text}"),
+                ToHost::Notify { id, app_name, package, title, body, image } => eprintln!(
+                    "dev: notification {id} from {app_name} ({package}): '{title}' '{body}' image={:?}",
+                    image.map(|i| (i.width, i.height, i.has_alpha))
+                ),
+                ToHost::NotifyClose { id } => eprintln!("dev: notification {id} closed"),
                 ToHost::AudioOpen { stream, rate, channels } => {
                     eprintln!("dev: audio {stream} open: {rate} Hz x{channels}");
                     let file = std::fs::File::create(state.join(format!("audio-{stream}.raw"))).unwrap();

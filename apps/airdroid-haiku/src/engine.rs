@@ -711,6 +711,11 @@ impl Engine {
             ToHost::Cursor { window, buffer, .. } => host::window_hide_cursor(window, buffer.is_some()),
             ToHost::Apps { apps } => self.set_apps(apps),
             ToHost::Clipboard { text } => host::clipboard_set(&text),
+            ToHost::Notify { id, app_name, package, title, body, image } => {
+                let icon = self.apps.iter().find(|a| a.package == package).and_then(|a| a.icon_png.clone());
+                host::notify(id, &app_name, &package, &title, &body, image.as_ref(), icon.as_deref());
+            }
+            ToHost::NotifyClose { .. } => {} // air/OS notifications expire by themselves
             ToHost::Reply { req, ok, message } if self.waiters.contains_key(&req) => {
                 let mut conn = self.waiters.remove(&req).unwrap();
                 if let Some(name) = self.installs.remove(&req) {

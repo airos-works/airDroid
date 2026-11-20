@@ -14,6 +14,7 @@ mod compositor;
 mod container;
 mod drm;
 mod exec;
+mod notifications;
 mod hostlink;
 mod sys;
 
@@ -261,6 +262,8 @@ fn boot(link: &HostLink, cfg: &container::Config, inbox: &Arc<compositor::Inbox>
     let pid = container::start()?;
     exec::ANDROID_INIT.store(pid, Ordering::SeqCst);
     logf!("Android init is pid {pid}");
+    // Waydroid's host services: before system_server looks for them
+    notifications::start(link.clone());
 
     // boot watcher
     {

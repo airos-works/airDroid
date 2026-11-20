@@ -134,6 +134,16 @@ pub struct AppInfo {
     pub icon_png: Option<Vec<u8>>,
 }
 
+/// A notification's picture: GLib image-data layout (RGB or RGBA rows).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct NotifyImage {
+    pub width: u32,
+    pub height: u32,
+    pub rowstride: u32,
+    pub has_alpha: bool,
+    pub data: Vec<u8>,
+}
+
 /// Messages from the VM to the host.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum ToHost {
@@ -217,6 +227,18 @@ pub enum ToHost {
     },
     Clipboard {
         text: String,
+    },
+    /// An Android notification for the desktop (Waydroid's INotifications).
+    Notify {
+        id: u32,
+        app_name: String,
+        package: String,
+        title: String,
+        body: String,
+        image: Option<NotifyImage>,
+    },
+    NotifyClose {
+        id: u32,
     },
     /// The guest's audio stream (PCM s16le interleaved).
     AudioOpen {

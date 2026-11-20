@@ -22,8 +22,17 @@ const _BINDER_SET_MAX_THREADS: u64 = iow(5, 4);
 const TXN_DATA_SIZE: u64 = 64; // struct binder_transaction_data
 const BC_TRANSACTION: u32 = io_(b'c', 0, TXN_DATA_SIZE, 1);
 const BC_FREE_BUFFER: u32 = io_(b'c', 3, 8, 1);
+const BC_REPLY: u32 = io_(b'c', 1, TXN_DATA_SIZE, 1);
 const BC_ACQUIRE: u32 = io_(b'c', 5, 4, 1);
 const BC_RELEASE: u32 = io_(b'c', 6, 4, 1);
+const BC_INCREFS_DONE: u32 = io_(b'c', 8, 16, 1);
+const BC_ACQUIRE_DONE: u32 = io_(b'c', 9, 16, 1);
+const BC_ENTER_LOOPER: u32 = io_(b'c', 12, 0, 0);
+const BR_TRANSACTION: u32 = io_(b'r', 2, TXN_DATA_SIZE, 2);
+const TF_ONE_WAY: u32 = 0x01;
+const FLAT_BINDER_FLAG_ACCEPTS_FDS: u32 = 0x100;
+/// Android 13 ("aidl3") stability of a system binder.
+const STABILITY_SYSTEM: i32 = 0x0c;
 const BR_ERROR: u32 = io_(b'r', 0, 4, 2);
 const BR_OK: u32 = io_(b'r', 1, 0, 0);
 const BR_REPLY: u32 = io_(b'r', 3, TXN_DATA_SIZE, 2);
@@ -63,6 +72,8 @@ impl Drop for Binder {
 #[derive(Default)]
 pub struct Parcel {
     pub data: Vec<u8>,
+    /// offsets of binder objects in `data`
+    pub objects: Vec<u64>,
 }
 
 impl Parcel {
@@ -76,6 +87,15 @@ impl Parcel {
     }
     pub fn i32(&mut self, v: i32) {
         self.data.extend_from_slice(&v.to_le_bytes());
+    }
+    /// A local binder object (`cookie` identifies it in incoming calls).
+    pub fn local_binder(&mut self, cookie: u64) {
+        self.objects.push(self.data.len() as u64);
+        self.data.extend_from_slice(&BINDER_TYPE_BINDER.to_le_bytes());
+        self.data.extend_from_slice(&FLAT_BINDER_FLAG_ACCEPTS_FDS.to_le_bytes());
+        self.data.extend_from_slice(&cookie.to_le_bytes()); // binder (node ptr)
+        self.data.extend_from_slice(&cookie.to_le_bytes()); // cookie
+        self.i32(STABILITY_SYSTEM);
     }
     pub fn string16(&mut self, s: Option<&str>) {
         let Some(s) = s else {
@@ -103,6 +123,35 @@ pub struct Reply {
 }
 
 impl Reply {
+    /// Skips the RPC header of an incoming call (aidl3: strict mode flags,
+    /// work source, 'SYST', interface name); returns the interface.
+    pub fn rpc_header(&mut self) -> io::Result<String> {
+        self.i32()?;
+        self.i32()?;
+        self.i32()?;
+        Ok(self.string16()?.unwrap_or_default())
+    }
+    pub fn bool(&mut self) -> io::Result<bool> {
+        Ok(self.i32()? != 0)
+    }
+    pub fn bytes(&mut self) -> io::Result<Vec<u8>> {
+        let n = self.i32()?;
+        if n < 0 {
+            return Ok(Vec::new());
+        }
+        let n = n as usize;
+        let b = self.data.get(self.pos..self.pos + n).ok_or_else(|| io::Error::other("parcel too short"))?.to_vec();
+        self.pos = (self.pos + n + 3) & !3;
+        Ok(b)
+    }
+    /// Skips a binder object (flat_binder_object + stability).
+    pub fn skip_object(&mut self) -> io::Result<()> {
+        if self.pos + 28 > self.data.len() {
+            return Err(io::Error::other("parcel too short"));
+        }
+        self.pos += 28;
+        Ok(())
+    }
     pub fn i32(&mut self) -> io::Result<i32> {
         let b = self.data.get(self.pos..self.pos + 4).ok_or_else(|| io::Error::other("parcel too short"))?;
         self.pos += 4;
@@ -214,9 +263,9 @@ impl Binder {
         w.extend_from_slice(&0i32.to_le_bytes()); // sender pid
         w.extend_from_slice(&0u32.to_le_bytes()); // sender euid
         w.extend_from_slice(&(p.data.len() as u64).to_le_bytes());
-        w.extend_from_slice(&0u64.to_le_bytes()); // offsets size
+        w.extend_from_slice(&((p.objects.len() * 8) as u64).to_le_bytes()); // offsets size
         w.extend_from_slice(&(p.data.as_ptr() as u64).to_le_bytes());
-        w.extend_from_slice(&0u64.to_le_bytes()); // offsets
+        w.extend_from_slice(&(p.objects.as_ptr() as u64).to_le_bytes()); // offsets
         let mut read = vec![0u8; 4096];
         let mut first = true;
         loop {
@@ -258,6 +307,81 @@ impl Binder {
                         return Ok(Reply { data, pos: 0, handles });
                     }
                     other => return Err(io::Error::other(format!("binder: unexpected return {other:#x}"))),
+                }
+            }
+        }
+    }
+
+    /// IServiceManager.addService(name, our object `cookie`).
+    pub fn add_service(&self, name: &str, cookie: u64) -> io::Result<()> {
+        let mut p = Parcel::interface("android.os.IServiceManager");
+        p.string16(Some(name));
+        p.local_binder(cookie);
+        p.i32(0); // allowIsolated
+        p.i32(8); // DUMP_FLAG_PRIORITY_DEFAULT
+        let mut r = self.transact(0, 3, &p)?;
+        r.status()
+    }
+
+    /// Serves incoming transactions on the calling thread forever:
+    /// `handle(cookie, code, request)` returns the reply parcel (None for
+    /// an error). Reference counting commands are acknowledged.
+    pub fn serve(&self, mut handle: impl FnMut(u64, u32, &mut Reply) -> Option<Parcel>) -> io::Result<()> {
+        self.command(BC_ENTER_LOOPER, &[])?;
+        let mut read = vec![0u8; 8192];
+        loop {
+            let n = self.write_read(&[], &mut read)?;
+            let mut i = 0;
+            while i + 4 <= n {
+                let cmd = u32::from_le_bytes(read[i..i + 4].try_into().unwrap());
+                i += 4;
+                match cmd {
+                    BR_NOOP | BR_TRANSACTION_COMPLETE | BR_SPAWN_LOOPER | BR_OK => {}
+                    BR_INCREFS | BR_ACQUIRE => {
+                        let ptrs = read[i..i + 16].to_vec();
+                        i += 16;
+                        self.command(if cmd == BR_INCREFS { BC_INCREFS_DONE } else { BC_ACQUIRE_DONE }, &ptrs)?;
+                    }
+                    BR_RELEASE | BR_DECREFS => i += 16,
+                    BR_ERROR => i += 4,
+                    BR_TRANSACTION => {
+                        let t = read[i..i + TXN_DATA_SIZE as usize].to_vec();
+                        i += TXN_DATA_SIZE as usize;
+                        let u64_at = |o: usize| u64::from_le_bytes(t[o..o + 8].try_into().unwrap());
+                        let u32_at = |o: usize| u32::from_le_bytes(t[o..o + 4].try_into().unwrap());
+                        let cookie = u64_at(8);
+                        let code = u32_at(16);
+                        let flags = u32_at(20);
+                        let (size, buf) = (u64_at(32) as usize, u64_at(48));
+                        let data = unsafe { std::slice::from_raw_parts(buf as *const u8, size) }.to_vec();
+                        self.command(BC_FREE_BUFFER, &buf.to_le_bytes())?;
+                        let mut req = Reply { data, pos: 0, handles: Vec::new() };
+                        let reply = handle(cookie, code, &mut req);
+                        if flags & TF_ONE_WAY == 0 {
+                            let p = reply.unwrap_or_else(|| {
+                                let mut p = Parcel::default();
+                                p.i32(-1); // EX_SECURITY-ish: refuse
+                                p
+                            });
+                            let mut w = Vec::with_capacity(4 + TXN_DATA_SIZE as usize);
+                            w.extend_from_slice(&BC_REPLY.to_le_bytes());
+                            w.extend_from_slice(&0u64.to_le_bytes());
+                            w.extend_from_slice(&0u64.to_le_bytes());
+                            w.extend_from_slice(&0u32.to_le_bytes());
+                            w.extend_from_slice(&TF_ACCEPT_FDS.to_le_bytes());
+                            w.extend_from_slice(&0i32.to_le_bytes());
+                            w.extend_from_slice(&0u32.to_le_bytes());
+                            w.extend_from_slice(&(p.data.len() as u64).to_le_bytes());
+                            w.extend_from_slice(&0u64.to_le_bytes());
+                            w.extend_from_slice(&(p.data.as_ptr() as u64).to_le_bytes());
+                            w.extend_from_slice(&0u64.to_le_bytes());
+                            self.write_read(&w, &mut [])?;
+                        }
+                    }
+                    _ => {
+                        // a command we do not decode: its size is in its code
+                        i += ((cmd >> 16) & 0x3fff) as usize;
+                    }
                 }
             }
         }
