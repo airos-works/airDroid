@@ -351,6 +351,15 @@ impl Engine {
         } else {
             (self.settings.width.min(sw), self.settings.height.min(sh))
         };
+        // GPU: virgl when QEMU has it and a Mesa with EGL can drive a GPU
+        let qemu_gl = res.qemu.parent().map(|d| d.join("lib/libvirglrenderer.so.1").exists()).unwrap_or(false);
+        let gl = if qemu_gl { crate::paths::gl_environment() } else { None };
+        let (gpu, env) = match (self.settings.gpu.as_str(), gl) {
+            ("none", _) | (_, None) => ("none".to_string(), Vec::new()),
+            ("virgl", Some((env, _))) => ("virgl".to_string(), env),
+            (_, Some((env, true))) => ("virgl".to_string(), env),
+            (_, Some(_)) => ("none".to_string(), Vec::new()), // llvmpipe only: SwiftShader is faster
+        };
         let images = self.paths.images();
         let cfg = VmConfig {
             qemu: res.qemu,
@@ -369,7 +378,8 @@ impl Engine {
             height,
             dpi: self.settings.dpi,
             multi_windows: self.settings.multi_windows,
-            gpu: "none".into(),
+            gpu,
+            env,
         };
         if cfg.accel == Accel::Tcg {
             self.status("Starting Android (no hardware virtualization: this will be slow)…");

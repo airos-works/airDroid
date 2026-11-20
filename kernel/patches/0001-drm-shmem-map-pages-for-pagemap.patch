@@ -1,0 +1,25 @@
+--- a/drivers/gpu/drm/drm_gem_shmem_helper.c
++++ b/drivers/gpu/drm/drm_gem_shmem_helper.c
+@@ -559,7 +559,12 @@
+ 	} else {
+ 		page = shmem->pages[page_offset];
+ 
+-		ret = vmf_insert_pfn(vma, vmf->address, page_to_pfn(page));
++		/*
++		 * airDroid: map the pages themselves (VM_MIXEDMAP), not their
++		 * PFNs, so /proc/self/pagemap reports them; the airDroid host
++		 * reads GPU buffers' backing pages by guest-physical address.
++		 */
++		ret = vmf_insert_page(vma, vmf->address, page);
+ 	}
+ 
+ 	dma_resv_unlock(shmem->base.resv);
+@@ -651,7 +656,7 @@
+ 	if (ret)
+ 		return ret;
+ 
+-	vm_flags_set(vma, VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
++	vm_flags_set(vma, VM_MIXEDMAP | VM_DONTEXPAND | VM_DONTDUMP);
+ 	vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
+ 	if (shmem->map_wc)
+ 		vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);

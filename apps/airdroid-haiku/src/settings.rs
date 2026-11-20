@@ -19,6 +19,8 @@ pub struct Settings {
     pub flavour: String,
     /// Send mouse clicks as touches (some games want touch).
     pub mouse_as_touch: bool,
+    /// "auto" (virgl when there is a GPU with EGL), "virgl" or "none".
+    pub gpu: String,
 }
 
 impl Default for Settings {
@@ -33,6 +35,7 @@ impl Default for Settings {
             cpus: cpus.clamp(2, 8),
             flavour: "VANILLA".into(),
             mouse_as_touch: false,
+            gpu: "auto".into(),
         }
     }
 }

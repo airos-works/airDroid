@@ -12,6 +12,7 @@ mod platform;
 mod pulse;
 mod compositor;
 mod container;
+mod drm;
 mod exec;
 mod hostlink;
 mod sys;

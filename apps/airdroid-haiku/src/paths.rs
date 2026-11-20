@@ -101,3 +101,30 @@ impl Resources {
         Ok(Resources { kernel, initrd, qemu, firmware, qemu_shares_ram: shares })
     }
 }
+
+/// Which Mesa QEMU's EGL (virglrenderer) should use, as glvnd environment:
+/// the AMD userland (radeonsi) on machines with a DRM render node, else
+/// Summit's private Mesa (Zink on a Vulkan driver such as NVK, or
+/// llvmpipe). None when no EGL-capable Mesa is installed.
+pub fn gl_environment() -> Option<(Vec<(String, String)>, bool)> {
+    let amd = Path::new("/boot/system/non-packaged/amdgpu");
+    let has_render_node = std::fs::read_dir("/dev/dri").map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with("renderD"))).unwrap_or(false);
+    let system_libs = "%A/lib:/boot/home/config/non-packaged/lib:/boot/home/config/lib:/boot/system/non-packaged/lib:/boot/system/lib";
+    let (vendor, lib, hardware) = if has_render_node && amd.join("add-ons/opengl/egl_vendor.d/50_mesa.json").exists() {
+        (amd.join("add-ons/opengl/egl_vendor.d/50_mesa.json"), amd.join("lib"), true)
+    } else {
+        let m = Path::new("/boot/system/lib/summit-webkit/mesa");
+        if !m.join("egl_vendor.d/50_mesa.json").exists() {
+            return None;
+        }
+        // a Vulkan driver means Zink runs on a GPU; else it is llvmpipe
+        let vulkan = std::fs::read_dir("/boot/system/add-ons/vulkan/icd.d").map(|d| d.count() > 0).unwrap_or(false)
+            || std::fs::read_dir("/boot/system/non-packaged/add-ons/vulkan/icd.d").map(|d| d.count() > 0).unwrap_or(false);
+        (m.join("egl_vendor.d/50_mesa.json"), m.join("lib"), vulkan)
+    };
+    let env = vec![
+        ("__EGL_VENDOR_LIBRARY_FILENAMES".to_string(), vendor.to_string_lossy().into_owned()),
+        ("LIBRARY_PATH".to_string(), format!("{}:{system_libs}", lib.to_string_lossy())),
+    ];
+    Some((env, hardware))
+}

@@ -73,7 +73,11 @@ pub struct VmConfig {
     pub height: u32,
     pub dpi: u32,
     pub multi_windows: bool,
+    /// "none" (Android renders with SwiftShader) or "virgl" (virtio-gpu
+    /// with virglrenderer on the host's GPU through EGL).
     pub gpu: String,
+    /// Extra environment for QEMU (which Mesa its EGL uses).
+    pub env: Vec<(String, String)>,
 }
 
 impl VmConfig {
@@ -108,7 +112,12 @@ impl VmConfig {
         if let Some(fw) = &self.firmware {
             push(&["-L", &p(fw)]);
         }
-        push(&["-nodefaults", "-no-user-config", "-nographic", "-no-reboot"]);
+        push(&["-nodefaults", "-no-user-config", "-no-reboot"]);
+        if self.gpu == "virgl" {
+            push(&["-display", "egl-headless", "-device", "virtio-gpu-gl-pci"]);
+        } else {
+            push(&["-display", "none"]);
+        }
         let machine = match self.ram {
             RamBackend::SharedFile(_) => "q35,memory-backend=ram0",
             RamBackend::NvmmMap(_) => "q35",
@@ -149,6 +158,9 @@ impl VmConfig {
         let _ = std::fs::remove_file(self.console_log());
         let log = std::fs::File::create(self.qemu_log())?;
         let mut cmd = Command::new(&self.qemu);
+        for (k, v) in &self.env {
+            cmd.env(k, v);
+        }
         if let RamBackend::NvmmMap(map) = &self.ram {
             let _ = std::fs::remove_file(map);
             cmd.env("QEMU_NVMM_MAP_FILE", map);

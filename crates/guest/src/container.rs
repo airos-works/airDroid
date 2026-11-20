@@ -187,6 +187,10 @@ fn populate_dev(cfg: &Config) -> io::Result<()> {
     sys::symlink("pts/ptmx", &format!("{dev}/ptmx"))?;
     if cfg.gpu != "none" {
         if let Ok(entries) = std::fs::read_dir("/dev/dri") {
+            // Android's graphics stack runs as several users
+            for e in std::fs::read_dir("/dev/dri").into_iter().flatten().flatten() {
+                let _ = sys::chmod(&e.path().to_string_lossy(), 0o666);
+            }
             sys::mkdir_p(&format!("{dev}/dri"), 0o755)?;
             for e in entries.flatten() {
                 let name = e.file_name().to_string_lossy().to_string();
@@ -232,10 +236,12 @@ pub fn make_props(cfg: &Config, extra: &[(String, String)]) -> String {
     set("ro.debuggable", "0");
     match cfg.gpu.as_str() {
         "virgl" => {
+            // Mesa's virgl driver on virtio-gpu (what Waydroid sets for a
+            // DRI node); Vulkan stays on lavapipe until Venus works
             set("ro.hardware.gralloc", "gbm");
             set("ro.hardware.egl", "mesa");
             set("gralloc.gbm.device", "/dev/dri/renderD128");
-            set("ro.hardware.vulkan", "virtio");
+            set("ro.hardware.vulkan", "lvp");
         }
         _ => {
             set("ro.hardware.gralloc", "default");

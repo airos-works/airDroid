@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
+use wayland_protocols::wp::linux_dmabuf::zv1::server::{zwp_linux_buffer_params_v1, zwp_linux_dmabuf_v1};
 use wayland_protocols::wp::presentation_time::server::{wp_presentation, wp_presentation_feedback};
 use wayland_protocols::wp::viewporter::server::{wp_viewport, wp_viewporter};
 use wayland_protocols::xdg::shell::server::{xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -192,6 +193,8 @@ struct BufferInfo {
     height: u32,
     format: u32,
     _pool: Option<Arc<Pool>>,
+    /// a virtio-gpu resource (dma-buf): read back before each frame
+    gpu: Option<Arc<crate::drm::GpuBuffer>>,
     /// a 1x1 pool buffer: its colour, read at commit (backgrounds)
     solid: Option<*const u32>,
 }
@@ -240,6 +243,9 @@ pub struct OutputCfg {
 
 pub struct State {
     link: HostLink,
+    drm: Option<crate::drm::Drm>,
+    /// GPU buffers attached since the last frames went out
+    readback: Vec<ObjectId>,
     out: OutputCfg,
     pagemap: std::fs::File,
     surfaces: HashMap<ObjectId, Surface>,
@@ -348,6 +354,12 @@ impl State {
         let window = self.root_window(id.clone());
         let Some(s) = self.surfaces.get_mut(id) else { return };
         if let Some(b) = st.buffer {
+            if let Some(nb) = b.as_ref() {
+                if self.buffers.get(&nb.id()).is_some_and(|i| i.gpu.is_some()) {
+                    self.readback.push(nb.id());
+                }
+            }
+            let Some(s) = self.surfaces.get_mut(id) else { return };
             let old = std::mem::replace(&mut s.buffer, b);
             if let Some(old) = old {
                 if s.buffer.as_ref() != Some(&old) {
@@ -482,6 +494,18 @@ impl State {
 
     /// Sends frames for dirty windows that have none in flight.
     fn flush_frames(&mut self) {
+        // GPU buffers: copy what Android rendered into their guest pages
+        if !self.readback.is_empty() {
+            if let Some(drm) = &self.drm {
+                for id in std::mem::take(&mut self.readback) {
+                    if let Some(g) = self.buffers.get(&id).and_then(|b| b.gpu.clone()) {
+                        if let Err(e) = drm.read_back(&g) {
+                            logf!("gpu read back: {e}");
+                        }
+                    }
+                }
+            }
+        }
         let now = sys::monotonic_ns();
         let ids: Vec<u32> = self.windows.keys().copied().collect();
         for wid in ids {
@@ -1149,7 +1173,7 @@ impl Dispatch<wl_shm_pool::WlShmPool, ()> for State {
                 }
                 st.buffers.insert(
                     buffer.id(),
-                    BufferInfo { host_id, width: width as u32, height: height as u32, format: fmt, _pool: Some(p), solid },
+                    BufferInfo { host_id, width: width as u32, height: height as u32, format: fmt, _pool: Some(p), gpu: None, solid },
                 );
             }
             wl_shm_pool::Request::Resize { size } => {
@@ -1176,7 +1200,13 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for State {
     fn destroyed(st: &mut State, _: ClientId, b: &wl_buffer::WlBuffer, _: &()) {
         if let Some(info) = st.buffers.remove(&b.id()) {
             st.link.send(&ToHost::BufferDestroy { id: info.host_id });
+            if let (Some(g), Some(drm)) = (info.gpu, &st.drm) {
+                if let Ok(g) = Arc::try_unwrap(g) {
+                    drm.release(&g);
+                }
+            }
         }
+        st.readback.retain(|x| x != &b.id());
     }
 }
 
@@ -1584,6 +1614,106 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for State {
     }
 }
 
+// ---- linux-dmabuf (gpu=virgl) ------------------------------------------------------
+
+// DRM fourccs
+const DRM_ARGB8888: u32 = 0x3432_5241;
+const DRM_XRGB8888: u32 = 0x3432_5258;
+const DRM_ABGR8888: u32 = 0x3432_4241;
+const DRM_XBGR8888: u32 = 0x3432_4258;
+
+/// DRM fourcc -> the protocol's (wl_shm) format code.
+fn drm_to_proto(f: u32) -> Option<u32> {
+    Some(match f {
+        DRM_ARGB8888 => format::ARGB8888,
+        DRM_XRGB8888 => format::XRGB8888,
+        DRM_ABGR8888 => format::ABGR8888,
+        DRM_XBGR8888 => format::XBGR8888,
+        _ => return None,
+    })
+}
+
+impl GlobalDispatch<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, ()> for State {
+    fn bind(_: &mut State, _: &DisplayHandle, _: &Client, r: New<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1>, _: &(), di: &mut DataInit<'_, State>) {
+        let d = di.init(r, ());
+        for f in [DRM_ARGB8888, DRM_XRGB8888, DRM_ABGR8888, DRM_XBGR8888] {
+            if d.version() >= 3 {
+                // linear only: what a transfer back into guest pages is laid out as
+                d.modifier(f, 0, 0);
+            } else {
+                d.format(f);
+            }
+        }
+    }
+}
+
+impl Dispatch<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, ()> for State {
+    fn request(_: &mut State, _: &Client, _: &zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, req: zwp_linux_dmabuf_v1::Request, _: &(), _: &DisplayHandle, di: &mut DataInit<'_, State>) {
+        if let zwp_linux_dmabuf_v1::Request::CreateParams { params_id } = req {
+            di.init(params_id, DmabufParams::default());
+        }
+    }
+}
+
+#[derive(Default)]
+struct DmabufParams(Mutex<Vec<(OwnedFd, u32, u32, u32)>>); // fd, plane, offset, stride
+
+impl Dispatch<zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, DmabufParams> for State {
+    fn request(
+        st: &mut State,
+        _: &Client,
+        params: &zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
+        req: zwp_linux_buffer_params_v1::Request,
+        planes: &DmabufParams,
+        _: &DisplayHandle,
+        di: &mut DataInit<'_, State>,
+    ) {
+        match req {
+            zwp_linux_buffer_params_v1::Request::Add { fd, plane_idx, offset, stride, .. } => {
+                planes.0.lock().unwrap().push((fd, plane_idx, offset, stride));
+            }
+            zwp_linux_buffer_params_v1::Request::CreateImmed { buffer_id, width, height, format: fourcc, .. } => {
+                let buffer = di.init(buffer_id, ());
+                let planes = std::mem::take(&mut *planes.0.lock().unwrap());
+                let Some((fd, _, offset, stride)) = planes.into_iter().find(|p| p.1 == 0) else {
+                    params.post_error(zwp_linux_buffer_params_v1::Error::Incomplete, "no plane 0");
+                    return;
+                };
+                let Some(fmt) = drm_to_proto(fourcc) else {
+                    params.post_error(zwp_linux_buffer_params_v1::Error::InvalidFormat, "format not supported");
+                    return;
+                };
+                let Some(drm) = &st.drm else { return };
+                let g = match drm.import(&fd, width as u32, height as u32, stride) {
+                    Ok(g) => Arc::new(g),
+                    Err(e) => {
+                        logf!("dma-buf import: {e}");
+                        params.post_error(zwp_linux_buffer_params_v1::Error::InvalidWlBuffer, "import failed");
+                        return;
+                    }
+                };
+                st.next_buffer += 1;
+                let host_id = st.next_buffer;
+                let addr = g.ptr as usize + offset as usize;
+                let len = (stride as usize * height as usize).min(g.len.saturating_sub(offset as usize));
+                match gpa_ranges(&mut st.pagemap, addr, len) {
+                    Ok(ranges) => st.link.send(&ToHost::BufferNew { id: host_id, width: width as u32, height: height as u32, stride, format: fmt, ranges }),
+                    Err(e) => logf!("gpu buffer {host_id}: no guest-physical pages: {e}"),
+                }
+                st.buffers.insert(
+                    buffer.id(),
+                    BufferInfo { host_id, width: width as u32, height: height as u32, format: fmt, _pool: None, gpu: Some(g), solid: None },
+                );
+            }
+            zwp_linux_buffer_params_v1::Request::Create { .. } => {
+                // only create_immed (what the hwcomposer uses)
+                params.failed();
+            }
+            _ => {}
+        }
+    }
+}
+
 // ---- event loop ----------------------------------------------------------------
 
 /// Host events for the compositor thread.
@@ -1619,6 +1749,12 @@ pub fn run(link: HostLink, inbox: Arc<Inbox>, socket: &str, out: OutputCfg) -> s
     dh.create_global::<State, wp_viewporter::WpViewporter, ()>(1, ());
     dh.create_global::<State, wp_presentation::WpPresentation, ()>(1, ());
     dh.create_global::<State, wl_data_device_manager::WlDataDeviceManager, ()>(3, ());
+    // GPU buffers only with a virtio-gpu (gpu=virgl); else Android uses shm
+    let drm = crate::drm::Drm::open().ok();
+    if drm.is_some() {
+        dh.create_global::<State, zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, ()>(3, ());
+        logf!("virtio-gpu present: dma-buf buffers enabled");
+    }
 
     let _ = std::fs::remove_file(socket);
     let listener = ListeningSocket::bind_absolute(socket.into()).map_err(|e| std::io::Error::other(format!("bind {socket}: {e}")))?;
@@ -1626,6 +1762,8 @@ pub fn run(link: HostLink, inbox: Arc<Inbox>, socket: &str, out: OutputCfg) -> s
 
     let mut st = State {
         link,
+        drm,
+        readback: Vec::new(),
         out,
         pagemap: std::fs::File::open("/proc/self/pagemap")?,
         surfaces: HashMap::new(),

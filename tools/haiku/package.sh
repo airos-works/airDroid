@@ -25,6 +25,11 @@ rm "$STAGE/airDroid.rsrc"
 cp "$B/vmlinuz" "$B/initramfs.img" "$STAGE/data/airDroid/"
 cp "$B"/qemu/firmware/* "$STAGE/data/airDroid/firmware/"
 cp "$B/qemu/qemu-system-x86_64" "$STAGE/lib/airDroid/"
+# QEMU's GL libraries (GPU=1 build): libepoxy, virglrenderer, pixman
+if [[ -d $B/qemu/lib ]]; then
+	mkdir -p "$STAGE/lib/airDroid/lib"
+	cp "$B"/qemu/lib/* "$STAGE/lib/airDroid/lib/"
+fi
 install -m 755 "$RES/airdroid-post-install.sh" "$STAGE/boot/post-install/airdroid.sh"
 ln -s ../../../../apps/airDroid "$STAGE/data/deskbar/menu/Applications/airDroid"
 cp "$ROOT/README.md" "$ROOT/docs/ARCHITECTURE.md" "$STAGE/documentation/packages/airdroid/"

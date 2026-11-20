@@ -94,7 +94,8 @@ fn main() {
         height,
         dpi,
         multi_windows: multi,
-        gpu: "none".into(),
+        gpu: arg(&args, "--gpu").unwrap_or_else(|| "none".into()),
+        env: Vec::new(),
     };
     eprintln!("dev: qemu {}", cfg.args().join(" "));
     let mut child = cfg.spawn().expect("start qemu");

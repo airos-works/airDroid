@@ -5,8 +5,16 @@
 set -euo pipefail
 . "$(dirname "$0")/common.sh"
 src=$BUILD/linux-$LINUX_VERSION
-if [[ ! -d $src ]]; then
+# airDroid's kernel patches (kernel/patches); the tree is re-extracted when
+# they change
+stamp=$(cat "$ROOT"/kernel/patches/*.patch 2>/dev/null | sha256sum | cut -c1-16)
+if [[ ! -f $src/.airdroid-$stamp ]]; then
+	rm -rf "$src"
 	tar -C "$BUILD" -xf "$(fetch "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$LINUX_VERSION.tar.xz" "linux-$LINUX_VERSION.tar.xz")"
+	for p in "$ROOT"/kernel/patches/*.patch; do
+		[[ -f $p ]] && patch -d "$src" -p1 -s < "$p"
+	done
+	touch "$src/.airdroid-$stamp"
 fi
 # objtool needs libelf's headers; take them from the distribution's packages
 # without installing anything.
