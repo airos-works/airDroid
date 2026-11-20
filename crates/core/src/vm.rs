@@ -17,6 +17,13 @@ pub enum Accel {
 
 impl Accel {
     pub fn detect() -> Accel {
+        // AIRDROID_ACCEL=tcg|kvm|nvmm forces one (for testing)
+        match std::env::var("AIRDROID_ACCEL").as_deref() {
+            Ok("tcg") => return Accel::Tcg,
+            Ok("kvm") => return Accel::Kvm,
+            Ok("nvmm") => return Accel::Nvmm,
+            _ => {}
+        }
         if Path::new("/dev/misc/nvmm").exists() {
             Accel::Nvmm
         } else if Path::new("/dev/kvm").exists() {

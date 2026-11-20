@@ -137,7 +137,8 @@ fn main() {
             Ok(msg) => match msg {
                 ToHost::Hello { version, kernel } => {
                     eprintln!("dev: guest protocol {version}, kernel {kernel}");
-                    match cfg.open_guest_mem() {
+                    // AIRDROID_NO_GUESTMEM: never map guest RAM (for testing)
+                    match if std::env::var_os("AIRDROID_NO_GUESTMEM").is_some() { Err(std::io::Error::other("disabled")) } else { cfg.open_guest_mem() } {
                         Ok(m) => mem = Some(Arc::new(m)),
                         Err(e) => eprintln!("dev: cannot map guest RAM: {e}"),
                     }
