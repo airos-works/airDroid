@@ -6,7 +6,8 @@
 //!
 //! Commands (one per line, from stdin or the --cmd FIFO):
 //!   windows | apps | shot WIN FILE.png | tap WIN X Y | move WIN X Y
-//!   click WIN X Y | key WIN CODE | sh CMD... (Android) | vm CMD... (VM)
+//!   click WIN X Y | key WIN CODE | sh CMD... (Android, root) | shsh CMD...
+//!   (Android, shell user) | vm CMD... (VM)
 //!   install FILE.apk | launch PACKAGE | fullui | prop KEY VALUE | quit
 
 use airdroid_core::compose::{Buffer, Canvas};
@@ -25,6 +26,15 @@ struct Win {
     app_id: String,
     canvas: Canvas,
     frames: u64,
+}
+
+/// Plays like a sound card would: buffered audio drains at the stream's
+/// rate and comes back as credit; the PCM goes to state/audio-N.raw.
+struct AudioOut {
+    bps: u64,
+    buffered: u64,
+    played: u64,
+    file: std::fs::File,
 }
 
 #[derive(Default)]
@@ -115,6 +125,8 @@ fn main() {
     }
 
     let mut pending_done: Vec<(u32, u32)> = Vec::new();
+    let mut audio: HashMap<u32, AudioOut> = HashMap::new();
+    let mut last_audio = Instant::now();
     let mut next_vsync = Instant::now();
     loop {
         let timeout = next_vsync.saturating_duration_since(Instant::now());
@@ -192,13 +204,40 @@ fn main() {
                     }
                 }
                 ToHost::Clipboard { text } => eprintln!("dev: clipboard: {text}"),
+                ToHost::AudioOpen { stream, rate, channels } => {
+                    eprintln!("dev: audio {stream} open: {rate} Hz x{channels}");
+                    let file = std::fs::File::create(state.join(format!("audio-{stream}.raw"))).unwrap();
+                    audio.insert(stream, AudioOut { bps: rate as u64 * channels as u64 * 2, buffered: 0, played: 0, file });
+                }
+                ToHost::AudioData { stream, data } => {
+                    if let Some(a) = audio.get_mut(&stream) {
+                        a.buffered += data.len() as u64;
+                        let _ = a.file.write_all(&data);
+                    }
+                }
+                ToHost::AudioClose { stream } => {
+                    if let Some(a) = audio.remove(&stream) {
+                        eprintln!("dev: audio {stream} closed after {} bytes", a.played + a.buffered);
+                    }
+                }
                 ToHost::Cursor { .. } => {}
-                other => eprintln!("dev: {other:?}"),
             },
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 eprintln!("dev: VM connection closed");
                 break;
+            }
+        }
+        let dt = last_audio.elapsed();
+        if dt >= Duration::from_millis(10) {
+            last_audio = Instant::now();
+            for (stream, a) in audio.iter_mut() {
+                let n = (a.bps * dt.as_micros() as u64 / 1_000_000).min(a.buffered) / 4 * 4;
+                if n > 0 {
+                    a.buffered -= n;
+                    a.played += n;
+                    let _ = session.send(&ToGuest::AudioCredit { stream: *stream, bytes: n });
+                }
             }
         }
         if Instant::now() >= next_vsync {
@@ -262,11 +301,12 @@ fn command(line: &str, host: &Arc<Mutex<Host>>, s: &Session) {
             s.send(&ToGuest::Key { window: win, code, pressed: false })
         }
         Some("close") => s.send(&ToGuest::WindowClose { id: win }),
-        Some("sh") | Some("vm") => {
-            let android = parts[0] == "sh";
+        Some("sh") | Some("vm") | Some("shsh") => {
+            let android = parts[0] != "vm";
+            let uid = (parts[0] == "shsh").then_some(2000);
             let cmd = line.splitn(2, ' ').nth(1).unwrap_or("").to_string();
             let argv = if android { vec!["/system/bin/sh".into(), "-c".into(), cmd] } else { vec!["/bin/sh".into(), "-c".into(), cmd] };
-            s.send(&ToGuest::Exec { req: s.next_req(), argv, android, stdin: Vec::new() })
+            s.send(&ToGuest::Exec { req: s.next_req(), argv, android, uid, stdin: Vec::new() })
         }
         Some("install") => {
             let path = PathBuf::from(parts.get(1).copied().unwrap_or(""));

@@ -100,6 +100,10 @@ mod ffi {
         pub fn ad_app_path(buf: *mut libc::c_char, len: usize) -> i32;
         pub fn ad_screen_size(w: *mut i32, h: *mut i32) -> f32;
         pub fn ad_register_types(signature: *const libc::c_char);
+        pub fn ad_audio_open(id: u32, rate: u32, channels: u32);
+        pub fn ad_audio_write(id: u32, data: *const u8, len: usize);
+        pub fn ad_audio_take_consumed(id: u32) -> u64;
+        pub fn ad_audio_close(id: u32);
     }
 }
 
@@ -211,6 +215,19 @@ mod imp {
     pub fn register_types(signature: &str) {
         unsafe { ffi::ad_register_types(c(signature).as_ptr()) }
     }
+    pub fn audio_open(id: u32, rate: u32, channels: u32) {
+        unsafe { ffi::ad_audio_open(id, rate, channels) }
+    }
+    pub fn audio_write(id: u32, data: &[u8]) {
+        unsafe { ffi::ad_audio_write(id, data.as_ptr(), data.len()) }
+    }
+    /// Bytes played since the last call.
+    pub fn audio_take_consumed(id: u32) -> u64 {
+        unsafe { ffi::ad_audio_take_consumed(id) }
+    }
+    pub fn audio_close(id: u32) {
+        unsafe { ffi::ad_audio_close(id) }
+    }
     pub fn screen_size() -> (u32, u32) {
         let (mut w, mut h) = (0, 0);
         unsafe { ffi::ad_screen_size(&mut w, &mut h) };
@@ -259,6 +276,12 @@ mod imp {
         std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned())
     }
     pub fn register_types(signature: &str) {}
+    pub fn audio_open(id: u32, rate: u32, channels: u32) {}
+    pub fn audio_write(id: u32, data: &[u8]) {}
+    pub fn audio_take_consumed(id: u32) -> u64 {
+        0
+    }
+    pub fn audio_close(id: u32) {}
     pub fn screen_size() -> (u32, u32) {
         (1920, 1080)
     }

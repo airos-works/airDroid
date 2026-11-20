@@ -314,6 +314,8 @@ pub enum ToGuest {
         req: u32,
         argv: Vec<String>,
         android: bool,
+        /// Run as this user (Android commands; 2000 is adb's shell user).
+        uid: Option<u32>,
         stdin: Vec<u8>,
     },
     /// Write a file in the guest (path relative to Android's /data when it
@@ -356,6 +358,12 @@ pub enum ToGuest {
         req: u32,
         key: String,
         value: String,
+    },
+    /// The host played `bytes` of audio stream `stream`: the guest may send
+    /// that much more (audio is paced by the host's playback).
+    AudioCredit {
+        stream: u32,
+        bytes: u64,
     },
     Shutdown,
 }

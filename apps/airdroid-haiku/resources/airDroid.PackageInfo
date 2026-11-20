@@ -22,6 +22,7 @@ urls {
 provides {
 	airdroid = 0.1.0
 	app:airDroid = 0.1.0
+	cmd:airdroid = 0.1.0
 }
 requires {
 	haiku >= r1~beta6

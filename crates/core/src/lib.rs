@@ -4,6 +4,7 @@
 //! (`crates/devtool`) both build on it.
 
 pub mod compose;
+pub mod control;
 pub mod guestmem;
 pub mod images;
 pub mod qcow2;

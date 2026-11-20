@@ -37,6 +37,7 @@
 #include <Region.h>
 #include <Roster.h>
 #include <Screen.h>
+#include <SoundPlayer.h>
 #include <ScrollView.h>
 #include <StatusBar.h>
 #include <StringView.h>
@@ -779,6 +780,49 @@ SetNodeIcon(BNode& node, BBitmap* rgba)
 }
 
 
+// #pragma mark - audio
+
+
+/*! One Android audio stream, played with the Media Kit. The guest sends
+	only as much as was played (credits), so the ring buffer stays small. */
+struct AudioOut {
+	BSoundPlayer*		player;
+	std::mutex			lock;
+	std::vector<uint8>	ring;
+	size_t				read;
+	size_t				fill;
+	uint64				consumed;
+
+	AudioOut() : player(NULL), read(0), fill(0), consumed(0) {}
+};
+
+
+static std::mutex sAudioLock;
+static std::map<uint32, AudioOut*> sAudio;
+
+
+static void
+PlayAudio(void* cookie, void* buffer, size_t size,
+	const media_raw_audio_format& format)
+{
+	AudioOut* a = (AudioOut*)cookie;
+	uint8* out = (uint8*)buffer;
+	std::lock_guard<std::mutex> lock(a->lock);
+	size_t n = std::min(size, a->fill);
+	size_t cap = a->ring.size();
+	for (size_t done = 0; done < n;) {
+		size_t chunk = std::min(n - done, cap - a->read);
+		memcpy(out + done, &a->ring[a->read], chunk);
+		a->read = (a->read + chunk) % cap;
+		done += chunk;
+	}
+	a->fill -= n;
+	a->consumed += n;
+	if (n < size)
+		memset(out + n, 0, size - n);	// underrun: silence
+}
+
+
 // #pragma mark - C API
 
 
@@ -1123,6 +1167,89 @@ ad_register_types(const char* signature)
 	char preferred[B_MIME_TYPE_LENGTH];
 	if (apk.GetPreferredApp(preferred) != B_OK || preferred[0] == '\0')
 		apk.SetPreferredApp(signature);
+}
+
+
+void
+ad_audio_open(uint32 id, uint32 rate, uint32 channels)
+{
+	AudioOut* a = new AudioOut;
+	a->ring.resize(rate * channels * 2);	// one second: credits keep it lower
+	media_raw_audio_format format = media_raw_audio_format::wildcard;
+	format.frame_rate = rate;
+	format.channel_count = channels;
+	format.format = media_raw_audio_format::B_AUDIO_SHORT;
+	format.byte_order = B_MEDIA_LITTLE_ENDIAN;
+	format.buffer_size = rate / 100 * channels * 2;	// 10 ms
+	a->player = new BSoundPlayer(&format, "airDroid", PlayAudio, NULL, a);
+	if (a->player->InitCheck() == B_OK) {
+		a->player->Start();
+		a->player->SetHasData(true);
+	}
+	std::lock_guard<std::mutex> lock(sAudioLock);
+	sAudio[id] = a;
+}
+
+
+void
+ad_audio_write(uint32 id, const uint8* data, size_t length)
+{
+	AudioOut* a;
+	{
+		std::lock_guard<std::mutex> lock(sAudioLock);
+		auto it = sAudio.find(id);
+		if (it == sAudio.end())
+			return;
+		a = it->second;
+	}
+	std::lock_guard<std::mutex> lock(a->lock);
+	size_t cap = a->ring.size();
+	length = std::min(length, cap - a->fill);	// overrun: drop the excess
+	size_t write = (a->read + a->fill) % cap;
+	for (size_t done = 0; done < length;) {
+		size_t chunk = std::min(length - done, cap - write);
+		memcpy(&a->ring[write], data + done, chunk);
+		write = (write + chunk) % cap;
+		done += chunk;
+	}
+	a->fill += length;
+}
+
+
+/*! Bytes of stream `id` played since the last call. */
+uint64
+ad_audio_take_consumed(uint32 id)
+{
+	AudioOut* a;
+	{
+		std::lock_guard<std::mutex> lock(sAudioLock);
+		auto it = sAudio.find(id);
+		if (it == sAudio.end())
+			return 0;
+		a = it->second;
+	}
+	std::lock_guard<std::mutex> lock(a->lock);
+	uint64 n = a->consumed;
+	a->consumed = 0;
+	return n;
+}
+
+
+void
+ad_audio_close(uint32 id)
+{
+	AudioOut* a;
+	{
+		std::lock_guard<std::mutex> lock(sAudioLock);
+		auto it = sAudio.find(id);
+		if (it == sAudio.end())
+			return;
+		a = it->second;
+		sAudio.erase(it);
+	}
+	a->player->Stop();
+	delete a->player;
+	delete a;
 }
 
 

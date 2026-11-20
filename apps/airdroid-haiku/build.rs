@@ -14,7 +14,7 @@ fn main() {
         .flag("-frtti")
         .opt_level(2)
         .compile("airdroid_host");
-    for lib in ["be", "tracker", "translation", "stdc++"] {
+    for lib in ["be", "tracker", "translation", "media", "stdc++"] {
         println!("cargo:rustc-link-lib=dylib={lib}");
     }
 }

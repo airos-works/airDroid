@@ -1,0 +1,14 @@
+[package]
+name = "airdroid-cli"
+description = "The airdroid command: waydroid's command line for the running airDroid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "airdroid"
+path = "src/main.rs"
+
+[dependencies]
+airdroid-core = { path = "../core" }

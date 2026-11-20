@@ -9,6 +9,7 @@
 mod apps;
 mod binder;
 mod platform;
+mod pulse;
 mod compositor;
 mod container;
 mod exec;
@@ -21,6 +22,8 @@ use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+
+static PULSE: std::sync::OnceLock<Arc<pulse::Pulse>> = std::sync::OnceLock::new();
 
 fn status(link: &HostLink, stage: BootStage, detail: &str) {
     logf!("{stage:?}: {detail}");
@@ -110,7 +113,7 @@ fn handle(link: &HostLink, inbox: &Arc<compositor::Inbox>, msg: ToGuest) {
                 logf!("host speaks protocol {version}, we speak {}", proto::PROTOCOL_VERSION);
             }
         }
-        ToGuest::Exec { req, argv, android, stdin } => exec::spawn_for_host(link.clone(), req, argv, android, stdin),
+        ToGuest::Exec { req, argv, android, uid, stdin } => exec::spawn_for_host(link.clone(), req, argv, android, uid, stdin),
         ToGuest::PutFile { req, path, offset, data, last } => match put_file(req, &path, offset, &data, last) {
             Ok(true) => link.send(&ToHost::Reply { req, ok: true, message: path }),
             Ok(false) => {}
@@ -123,6 +126,11 @@ fn handle(link: &HostLink, inbox: &Arc<compositor::Inbox>, msg: ToGuest) {
         ToGuest::LaunchIntent { req, action, uri } => apps::spawn(link.clone(), req, apps::Action::Intent(action, uri)),
         ToGuest::SetProp { req, key, value } => apps::spawn(link.clone(), req, apps::Action::SetProp(key, value)),
         ToGuest::ListApps => apps::spawn(link.clone(), 0, apps::Action::List),
+        ToGuest::AudioCredit { stream, bytes } => {
+            if let Some(p) = PULSE.get() {
+                p.credit(stream, bytes);
+            }
+        }
         ToGuest::Shutdown => {
             logf!("shutdown requested");
             std::thread::spawn(|| {
@@ -237,6 +245,14 @@ fn boot(link: &HostLink, cfg: &container::Config, inbox: &Arc<compositor::Inbox>
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // the audio HAL's PulseAudio socket (waydroid.pulse_runtime_path)
+    match pulse::start(link.clone(), &format!("{}/pulse/native", container::XDG_RUNTIME)) {
+        Ok(p) => {
+            let _ = PULSE.set(p);
+        }
+        Err(e) => logf!("no audio: {e}"),
     }
 
     status(link, BootStage::StartingAndroid, "starting Android");

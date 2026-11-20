@@ -10,7 +10,9 @@ use airdroid_core::proto::Rect;
 use airdroid_core::guestmem::GuestMem;
 use airdroid_core::images;
 use airdroid_core::proto::{AppInfo, BootStage, ToGuest, ToHost, TouchKind};
+use airdroid_core::control;
 use airdroid_core::session::Session;
+use std::os::unix::net::{UnixListener, UnixStream};
 use airdroid_core::vm::{Accel, RamBackend, VmConfig};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -22,6 +24,8 @@ use std::time::{Duration, Instant};
 
 pub enum Msg {
     Host(Event),
+    /// A request from the `airdroid` command and the connection to answer on.
+    Control(control::Request, UnixStream),
     Guest(ToHost),
     GuestGone,
     SetupProgress(String, f32),
@@ -85,6 +89,10 @@ pub struct Engine {
     quitting: bool,
     epoch: Instant,
     cancel_setup: Arc<AtomicBool>,
+    /// open audio streams (the host plays them; credits go back)
+    audio: Vec<u32>,
+    /// `airdroid` commands waiting for a guest answer, by request id
+    waiters: HashMap<u32, UnixStream>,
 }
 
 const FRAME: Duration = Duration::from_micros(16_667);
@@ -114,6 +122,8 @@ impl Engine {
             quitting: false,
             epoch: Instant::now(),
             cancel_setup: Arc::new(AtomicBool::new(false)),
+            audio: Vec::new(),
+            waiters: HashMap::new(),
         }
     }
 
@@ -125,6 +135,7 @@ impl Engine {
 
     pub fn run(mut self, rx: Receiver<Msg>, args: Vec<String>) {
         host::main_set_multiwindow(self.settings.multi_windows);
+        self.start_control();
         self.handle_args(&args);
         if images::installed(&self.paths.images()).is_some() {
             self.start_vm();
@@ -134,9 +145,12 @@ impl Engine {
         }
         loop {
             let timeout = self.next_vsync.saturating_duration_since(Instant::now());
-            let msg = if self.frames_done.is_empty() { rx.recv_timeout(Duration::from_millis(250)) } else { rx.recv_timeout(timeout) };
+            // audio credits need a short tick while streams are open
+            let idle = if self.audio.is_empty() { Duration::from_millis(250) } else { Duration::from_millis(10) };
+            let msg = if self.frames_done.is_empty() { rx.recv_timeout(idle) } else { rx.recv_timeout(timeout.min(idle)) };
             match msg {
                 Ok(Msg::Host(ev)) => self.host_event(ev),
+                Ok(Msg::Control(req, conn)) => self.control(req, conn),
                 Ok(Msg::Guest(m)) => self.guest_message(m),
                 Ok(Msg::GuestGone) => self.vm_gone(),
                 Ok(Msg::SetupProgress(text, p)) => host::main_set_status(&text, p),
@@ -145,11 +159,122 @@ impl Engine {
                 Err(RecvTimeoutError::Disconnected) => break,
             }
             self.vsync();
+            self.audio_credits();
             if self.quitting && self.child.is_none() {
                 break;
             }
         }
         host::quit();
+    }
+
+    /// The control socket for the `airdroid` command.
+    fn start_control(&self) {
+        let _ = std::fs::create_dir_all(&self.paths.state);
+        let path = control::socket_path(&self.paths.state);
+        let _ = std::fs::remove_file(&path);
+        let listener = match UnixListener::bind(&path) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("airDroid: control socket {}: {e}", path.display());
+                return;
+            }
+        };
+        let tx = self.tx.clone();
+        std::thread::Builder::new()
+            .name("airDroid control".into())
+            .spawn(move || {
+                for conn in listener.incoming().flatten() {
+                    let mut line = Vec::new();
+                    let mut byte = [0u8; 1];
+                    let mut c = conn;
+                    use std::io::Read;
+                    while c.read_exact(&mut byte).is_ok() && byte[0] != b'\n' && line.len() < 1 << 20 {
+                        line.push(byte[0]);
+                    }
+                    match serde_json::from_slice::<control::Request>(&line) {
+                        Ok(req) => {
+                            if tx.send(Msg::Control(req, c)).is_err() {
+                                return;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = control::write_frame(&mut c, control::ERR, format!("airDroid: bad request: {e}\n").as_bytes());
+                            let _ = control::write_frame(&mut c, control::EXIT, &2i32.to_le_bytes());
+                        }
+                    }
+                }
+            })
+            .ok();
+    }
+
+    fn control(&mut self, req: control::Request, mut conn: UnixStream) {
+        use control::Request as R;
+        let finish = |conn: &mut UnixStream, text: &str, code: i32| {
+            let kind = if code == 0 { control::OUT } else { control::ERR };
+            if !text.is_empty() {
+                let _ = control::write_frame(conn, kind, format!("{}\n", text.trim_end()).as_bytes());
+            }
+            let _ = control::write_frame(conn, control::EXIT, &code.to_le_bytes());
+        };
+        match req {
+            R::Status => {
+                let text = match self.phase {
+                    Phase::NotInstalled => "Android is not installed".to_string(),
+                    Phase::Downloading => "Downloading Android".to_string(),
+                    Phase::Stopped => "Android is stopped".to_string(),
+                    Phase::Starting => "Android is starting".to_string(),
+                    Phase::Booted => format!("Android is running ({} apps, {} windows)", self.apps.len(), self.windows.len()),
+                    Phase::Stopping => "Android is stopping".to_string(),
+                };
+                finish(&mut conn, &text, 0);
+            }
+            R::List => {
+                let mut out = String::new();
+                for a in &self.apps {
+                    out.push_str(&format!("{}\t{}\n", a.package, display_name(a)));
+                }
+                finish(&mut conn, &out, 0);
+            }
+            R::Stop => {
+                self.stop_vm();
+                finish(&mut conn, "", 0);
+            }
+            R::Launch { package } if self.phase != Phase::Booted => {
+                self.request(Pending::Launch(package));
+                finish(&mut conn, "Android is starting; the app opens when it is up.", 0);
+            }
+            R::Install { path } if self.phase != Phase::Booted => {
+                self.request(Pending::Install(PathBuf::from(path)));
+                finish(&mut conn, "Android is starting; the app is installed when it is up.", 0);
+            }
+            _ if self.phase != Phase::Booted => finish(&mut conn, "Android is not running", 1),
+            R::Install { path } => {
+                if let Some(req) = self.request(Pending::Install(PathBuf::from(path))) {
+                    self.waiters.insert(req, conn);
+                }
+            }
+            req => {
+                let Some(s) = self.session.clone() else { return finish(&mut conn, "Android is not running", 1) };
+                let id = s.next_req();
+                let msg = match req {
+                    R::Shell { argv, uid, vm } => {
+                        let argv = if argv.is_empty() { vec!["/system/bin/sh".into(), "-c".into(), "echo use: airdroid shell COMMAND".into()] } else { argv };
+                        ToGuest::Exec { req: id, argv, android: !vm, uid, stdin: Vec::new() }
+                    }
+                    R::Remove { package } => ToGuest::RemoveApp { req: id, package },
+                    R::Launch { package } => ToGuest::LaunchApp { req: id, package },
+                    R::Intent { action, uri } => ToGuest::LaunchIntent { req: id, action, uri },
+                    R::ShowFullUi => ToGuest::ShowFullUi { req: id },
+                    R::SetProp { key, value } => ToGuest::SetProp { req: id, key, value },
+                    _ => return,
+                };
+                if s.send(&msg).is_ok() {
+                    self.waiters.insert(id, conn);
+                } else {
+                    finish(&mut conn, "the VM went away", 1);
+                }
+            }
+        }
     }
 
     fn start_setup(&mut self) {
@@ -315,6 +440,9 @@ impl Engine {
         }
         self.windows.clear();
         self.frames_done.clear();
+        for stream in self.audio.drain(..) {
+            host::audio_close(stream);
+        }
         if self.phase != Phase::NotInstalled {
             self.phase = Phase::Stopped;
         }
@@ -332,7 +460,9 @@ impl Engine {
                         self.request(Pending::Launch(p.clone()));
                     }
                 }
-                "--full-ui" => self.request(Pending::FullUi),
+                "--full-ui" => {
+                    self.request(Pending::FullUi);
+                }
                 "--install" | "-i" => {
                     if let Some(p) = it.next() {
                         self.request(Pending::Install(PathBuf::from(p)));
@@ -341,27 +471,33 @@ impl Engine {
                 "--stop" => {
                     self.stop_vm();
                 }
-                p if p.ends_with(".apk") => self.request(Pending::Install(PathBuf::from(p))),
+                p if p.ends_with(".apk") => {
+                    self.request(Pending::Install(PathBuf::from(p)));
+                }
                 _ => {}
             }
         }
     }
 
-    fn request(&mut self, p: Pending) {
+    /// Sends a request now, or queues it until Android is up; the id of an
+    /// install (its Reply comes when it is done).
+    fn request(&mut self, p: Pending) -> Option<u32> {
         if self.phase != Phase::Booted {
             self.pending.push(p);
             if self.phase == Phase::Stopped {
                 self.start_vm();
             }
-            return;
+            return None;
         }
-        let Some(s) = self.session.clone() else { return };
+        let Some(s) = self.session.clone() else { return None };
         match p {
             Pending::Launch(package) => {
                 let _ = s.send(&ToGuest::LaunchApp { req: s.next_req(), package });
+                None
             }
             Pending::FullUi => {
                 let _ = s.send(&ToGuest::ShowFullUi { req: s.next_req() });
+                None
             }
             Pending::Install(path) => {
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "app.apk".into());
@@ -379,6 +515,7 @@ impl Engine {
                         let _ = tx.send(Msg::Guest(ToHost::Reply { req, ok: false, message: e.to_string() }));
                     }
                 });
+                Some(req)
             }
         }
     }
@@ -480,6 +617,17 @@ impl Engine {
             ToHost::Cursor { window, buffer, .. } => host::window_hide_cursor(window, buffer.is_some()),
             ToHost::Apps { apps } => self.set_apps(apps),
             ToHost::Clipboard { text } => host::clipboard_set(&text),
+            ToHost::Reply { req, ok, message } if self.waiters.contains_key(&req) => {
+                let mut conn = self.waiters.remove(&req).unwrap();
+                if let Some(name) = self.installs.remove(&req) {
+                    self.status(&format!("{name} {}.", if ok { "is installed" } else { "could not be installed" }));
+                }
+                let kind = if ok { control::OUT } else { control::ERR };
+                if !message.trim().is_empty() {
+                    let _ = control::write_frame(&mut conn, kind, format!("{}\n", message.trim_end()).as_bytes());
+                }
+                let _ = control::write_frame(&mut conn, control::EXIT, &(if ok { 0i32 } else { 1 }).to_le_bytes());
+            }
             ToHost::Reply { req, ok, message } => {
                 if let Some(name) = self.installs.remove(&req) {
                     if ok {
@@ -492,8 +640,27 @@ impl Engine {
                     self.status(message.trim());
                 }
             }
-            ToHost::ExecOutput { .. } | ToHost::ExecDone { .. } => {}
-            ToHost::AudioOpen { .. } | ToHost::AudioData { .. } | ToHost::AudioClose { .. } => {}
+            ToHost::ExecOutput { req, stderr, data } => {
+                if let Some(conn) = self.waiters.get_mut(&req) {
+                    if control::write_frame(conn, if stderr { control::ERR } else { control::OUT }, &data).is_err() {
+                        self.waiters.remove(&req);
+                    }
+                }
+            }
+            ToHost::ExecDone { req, code } => {
+                if let Some(mut conn) = self.waiters.remove(&req) {
+                    let _ = control::write_frame(&mut conn, control::EXIT, &code.to_le_bytes());
+                }
+            }
+            ToHost::AudioOpen { stream, rate, channels } => {
+                host::audio_open(stream, rate, channels);
+                self.audio.push(stream);
+            }
+            ToHost::AudioData { stream, data } => host::audio_write(stream, &data),
+            ToHost::AudioClose { stream } => {
+                host::audio_close(stream);
+                self.audio.retain(|s| *s != stream);
+            }
         }
     }
 
@@ -517,6 +684,16 @@ impl Engine {
             }
         } else {
             self.frames_done.clear();
+        }
+    }
+
+    fn audio_credits(&mut self) {
+        let Some(s) = &self.session else { return };
+        for &stream in &self.audio {
+            let bytes = host::audio_take_consumed(stream);
+            if bytes > 0 {
+                let _ = s.send(&ToGuest::AudioCredit { stream, bytes });
+            }
         }
     }
 
@@ -648,10 +825,14 @@ impl Engine {
                 let args: Vec<String> = e.text.split('\0').filter(|s| !s.is_empty()).map(str::to_string).collect();
                 self.handle_args(&args);
             }
-            kind::APP_CLICKED => self.request(Pending::Launch(e.text.clone())),
+            kind::APP_CLICKED => {
+                self.request(Pending::Launch(e.text.clone()));
+            }
             kind::CLIPBOARD => self.send(ToGuest::Clipboard { text: e.text.clone() }),
             kind::ACTION => match ev.key {
-                action::SHOW_FULL_UI => self.request(Pending::FullUi),
+                action::SHOW_FULL_UI => {
+                    self.request(Pending::FullUi);
+                }
                 action::INSTALL_APK => host::open_file_panel(),
                 action::STOP => self.stop_vm(),
                 action::START => {

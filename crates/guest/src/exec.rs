@@ -144,10 +144,10 @@ pub fn setprop(key: &str, value: &str) -> io::Result<()> {
 }
 
 /// Host-requested command: streams output back as it comes.
-pub fn spawn_for_host(link: HostLink, req: u32, argv: Vec<String>, android: bool, stdin: Vec<u8>) {
+pub fn spawn_for_host(link: HostLink, req: u32, argv: Vec<String>, android: bool, uid: Option<u32>, stdin: Vec<u8>) {
     std::thread::spawn(move || {
         let result = (|| -> io::Result<i32> {
-            let mut child = spawn_piped(&argv, android, None)?;
+            let mut child = spawn_piped(&argv, android, uid)?;
             let mut sin = child.stdin.take().unwrap();
             std::thread::spawn(move || {
                 let _ = sin.write_all(&stdin);
