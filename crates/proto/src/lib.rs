@@ -204,7 +204,11 @@ pub enum ToHost {
         width: u32,
         height: u32,
         layers: Vec<Layer>,
-        /// Changed area in window coordinates; empty means everything.
+        /// What each layer's surface changed against the window's frame
+        /// before this one, in window coordinates: a rectangle for each of
+        /// `layers` (an empty one: nothing). It counts where the layers
+        /// are in the same places (the host sees when they are not:
+        /// everything then). No rectangles at all: not known.
         damage: Vec<Rect>,
     },
     /// Pointer image for a window; None hides the pointer.
@@ -270,6 +274,12 @@ pub enum ToHost {
     },
     AudioInClose {
         stream: u32,
+    },
+    /// GPU buffer `id` has other pixels although the surface that shows it
+    /// kept it (a client drawing into its front buffer): what the host
+    /// copied of it before is old.
+    BufferDirty {
+        id: u32,
     },
 }
 

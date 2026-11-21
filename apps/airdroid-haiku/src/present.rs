@@ -11,7 +11,7 @@
 
 use airdroid_core::compose::Buffer;
 use airdroid_core::proto::{format, Layer, Rect};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -107,6 +107,54 @@ impl Present {
 
     /// Fills the guest backing of every GPU buffer among `layers` that shows
     /// in `area`.
+    /// Like `read_backings`, for what composing `region` needs: the layers
+    /// from the topmost one that hides the rest, of each the part in
+    /// `region` (an unscaled 32-bit layer; else the whole buffer), and only
+    /// buffers `backed` does not list: those QEMU copied whole before, and
+    /// a buffer keeps its pixels while a surface shows it. Lists the
+    /// buffers it copies whole.
+    pub fn read_backings_for(&mut self, layers: &[Layer], buffers: &HashMap<u32, Buffer>, region: Rect, backed: &mut HashSet<u32>) {
+        let first = airdroid_core::compose::first_needed(layers, buffers, &region).unwrap_or(0);
+        for l in &layers[first..] {
+            let Some(b) = buffers.get(&l.buffer) else { continue };
+            let seen = l.dst.intersect(&region);
+            if b.resource == 0 || seen.is_empty() || backed.contains(&l.buffer) {
+                continue;
+            }
+            let whole = Rect::new(0, 0, b.width as i32, b.height as i32);
+            let part = match part_of_buffer(l, b, &seen) {
+                Some(p) => p,
+                None => whole,
+            };
+            let req = Request {
+                res: b.resource,
+                x: part.x as u32,
+                y: part.y as u32,
+                w: part.w as u32,
+                h: part.h as u32,
+                area: -1,
+                // where the part starts in the buffer's guest memory
+                offset: part.y as u32 * b.stride + part.x as u32 * 4,
+                stride: if part == whole { 0 } else { b.stride },
+                flags: 0,
+            };
+            match self.request(req) {
+                Ok(()) => {
+                    if part == whole {
+                        backed.insert(l.buffer);
+                    }
+                }
+                Err(e) if crate::engine::debug() => eprintln!("airDroid: {e}"),
+                Err(_) => {}
+            }
+        }
+    }
+
+    /// QEMU copies all of one GPU buffer into guest memory.
+    pub fn read_whole(&mut self, b: &Buffer) -> Result<(), String> {
+        self.request(Request { res: b.resource, x: 0, y: 0, w: b.width, h: b.height, area: -1, offset: 0, stride: 0, flags: 0 })
+    }
+
     pub fn read_backings(&mut self, layers: &[Layer], buffers: &HashMap<u32, Buffer>, area: Rect) {
         for l in layers {
             let Some(b) = buffers.get(&l.buffer) else { continue };
@@ -120,6 +168,19 @@ impl Present {
             }
         }
     }
+}
+
+/// The part of `b` that the layer shows in `seen` (window coordinates,
+/// inside the layer's place), for an unscaled layer of a 32-bit buffer;
+/// None where only the whole buffer will do.
+fn part_of_buffer(l: &Layer, b: &Buffer, seen: &Rect) -> Option<Rect> {
+    let four_bytes = matches!(b.format, format::ARGB8888 | format::XRGB8888 | format::ABGR8888 | format::XBGR8888);
+    if !four_bytes || l.src.w != l.dst.w || l.src.h != l.dst.h {
+        return None;
+    }
+    let part = Rect::new(l.src.x + seen.x - l.dst.x, l.src.y + seen.y - l.dst.y, seen.w, seen.h)
+        .intersect(&Rect::new(0, 0, b.width as i32, b.height as i32));
+    (!part.is_empty()).then_some(part)
 }
 
 /// Whether the part of the frame in `area` is one GPU layer, unscaled and
@@ -163,6 +224,22 @@ mod tests {
     }
     fn layer(buffer: u32, src: Rect, dst: Rect, opaque: bool) -> Layer {
         Layer { buffer, src, dst, opaque }
+    }
+
+    #[test]
+    fn a_layer_part_is_in_buffer_coordinates() {
+        let b = gpu(488, 848, 42);
+        let l = Layer { buffer: 7, src: Rect::new(0, 0, 488, 848), dst: Rect::new(716, 100, 488, 848), opaque: true };
+        // the middle of the layer
+        assert_eq!(part_of_buffer(&l, &b, &Rect::new(816, 300, 100, 50)), Some(Rect::new(100, 200, 100, 50)));
+        // all of it
+        assert_eq!(part_of_buffer(&l, &b, &l.dst), Some(Rect::new(0, 0, 488, 848)));
+        // a cropped source keeps its offset
+        let c = Layer { src: Rect::new(10, 20, 100, 100), dst: Rect::new(0, 0, 100, 100), ..l.clone() };
+        assert_eq!(part_of_buffer(&c, &b, &Rect::new(5, 5, 10, 10)), Some(Rect::new(15, 25, 10, 10)));
+        // scaled: the whole buffer
+        let z = Layer { dst: Rect::new(0, 0, 244, 424), ..l.clone() };
+        assert_eq!(part_of_buffer(&z, &b, &Rect::new(0, 0, 10, 10)), None);
     }
 
     #[test]

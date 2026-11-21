@@ -6,7 +6,7 @@ use crate::keys;
 use crate::paths::{Paths, Resources};
 use crate::present::{self, Present};
 use crate::settings::Settings;
-use airdroid_core::compose::{content_bounds, opaque_bounds, Buffer, Canvas};
+use airdroid_core::compose::{buffer_changes, content_bounds, frame_changes, opaque_bounds, Buffer, Canvas};
 use airdroid_core::proto::Rect;
 use airdroid_core::guestmem::GuestMem;
 use airdroid_core::images;
@@ -54,7 +54,29 @@ enum Pending {
     FullUi,
 }
 
+/// What a window's last composed frames were, to paint only what changed.
+/// Its two bitmaps take turns: the one a frame is painted into holds the
+/// frame before the last, so it needs what the last two frames changed.
+#[derive(Default)]
+struct Painted {
+    /// the last frame's layers, the part of the window shown and its size
+    layers: Vec<airdroid_core::proto::Layer>,
+    area: Option<Rect>,
+    size: (u32, u32),
+    /// what the last frame changed against the one before; None: all of it
+    changed: Option<Rect>,
+    /// frames in a row composed like this (2 is enough to know)
+    frames: u8,
+    /// GPU buffers whose pixels are in guest memory (QEMU copied them, and
+    /// a surface has shown them since)
+    backed: std::collections::HashSet<u32>,
+    /// for the debug log: frames, of them painted whole, pixels painted,
+    /// buffers compared, ns comparing, ns reading and composing
+    stats: [u64; 6],
+}
+
 struct Win {
+    painted: Painted,
     canvas: Canvas,
     /// opaque bounds, recomputed when the layer geometry changes
     crop: Option<(Vec<(Rect, Rect)>, Option<Rect>)>,
@@ -723,7 +745,7 @@ impl Engine {
             ToHost::WindowDestroy { id } if debug() && { eprintln!("airDroid: window {id} destroyed"); false } => {}
             ToHost::WindowNew { id, title, app_id, .. } => {
                 let title = window_title(&title, &app_id, &self.apps);
-                self.windows.insert(id, Win { canvas: Canvas::new(), crop: None, title, shown: None, candidate: None, buttons: 0, touching: false });
+                self.windows.insert(id, Win { painted: Painted::default(), canvas: Canvas::new(), crop: None, title, shown: None, candidate: None, buttons: 0, touching: false });
             }
             ToHost::WindowUpdate { id, title, app_id, .. } => {
                 let t = window_title(&title, &app_id, &self.apps);
@@ -738,7 +760,12 @@ impl Engine {
                 host::window_close(id);
                 self.windows.remove(&id);
             }
-            ToHost::Frame { window, serial, width, height, layers, .. } => {
+            ToHost::BufferDirty { id } => {
+                for w in self.windows.values_mut() {
+                    w.painted.backed.remove(&id);
+                }
+            }
+            ToHost::Frame { window, serial, width, height, layers, damage } => {
                 if debug() {
                     eprintln!(
                         "airDroid: frame {window}/{serial} {width}x{height} {:?}",
@@ -794,9 +821,70 @@ impl Engine {
                         // only if there is none
                         let (aw, ah) = (area.w as u32, area.h as u32);
                         let canvas = &mut w.canvas;
+                        let painted = &mut w.painted;
                         let buffers = &self.buffers;
                         let mut gpu = self.present.as_mut();
                         let direct = gpu.as_ref().and_then(|_| present::direct(&layers, buffers, area));
+                        // Several layers: only what the last two frames
+                        // changed is painted (the bitmap holds the frame
+                        // before the last), and only buffers that came new
+                        // are copied out of the GPU.
+                        let same = painted.size == (aw, ah) && painted.area == Some(area);
+                        // what the guest says its clients damaged, where
+                        // the layers are where they were; without that,
+                        // the layers that got another buffer
+                        // (a solid layer's colour is in its src)
+                        let in_place = painted.layers.len() == layers.len()
+                            && painted.layers.iter().zip(&layers).all(|(a, b)| {
+                                (a.src, a.dst, a.opaque) == (b.src, b.dst, b.opaque) && (a.buffer == u32::MAX) == (b.buffer == u32::MAX)
+                            });
+                        // whole copies of what the last frame showed: what
+                        // this frame's buffers can be compared with
+                        let before = painted.backed.clone();
+                        painted.backed.retain(|id| layers.iter().any(|l| l.buffer == *id));
+                        let changed = if !(same && painted.frames >= 1) {
+                            None
+                        } else if damage.len() != layers.len() {
+                            frame_changes(&painted.layers, &layers)
+                        } else if in_place {
+                            let mut all = Rect::new(0, 0, 0, 0);
+                            for ((l, was), d) in layers.iter().zip(&painted.layers).zip(&damage) {
+                                let mut d = *d;
+                                // "All of it", in another buffer than the
+                                // last frame's: is it? (SurfaceFlinger's
+                                // own composition target comes like that,
+                                // every frame, with the same picture.)
+                                let plain = l.src.w == l.dst.w && l.src.h == l.dst.h;
+                                if !d.is_empty() && d == l.dst && plain && l.buffer != was.buffer && before.contains(&was.buffer) {
+                                    if let (Some(new), Some(old)) = (buffers.get(&l.buffer), buffers.get(&was.buffer)) {
+                                        let have = new.resource == 0
+                                            || painted.backed.contains(&l.buffer)
+                                            || gpu.as_deref_mut().is_some_and(|p| p.read_whole(new).is_ok());
+                                        if have {
+                                            if new.resource != 0 {
+                                                painted.backed.insert(l.buffer);
+                                            }
+                                            let t0 = std::time::Instant::now();
+                                            let c = buffer_changes(new, old, &l.src);
+                                            painted.stats[3] += 1;
+                                            painted.stats[4] += t0.elapsed().as_nanos() as u64;
+                                            if let Some(c) = c {
+                                                d = if c.is_empty() { c } else { Rect::new(l.dst.x + c.x - l.src.x, l.dst.y + c.y - l.src.y, c.w, c.h) };
+                                            }
+                                        }
+                                    }
+                                }
+                                all = all.union(&d);
+                            }
+                            Some(all)
+                        } else {
+                            None
+                        };
+                        let repaint = match (same && painted.frames >= 2, changed, painted.changed) {
+                            (true, Some(now), Some(before)) => Some(now.union(&before).intersect(&area)),
+                            _ => None,
+                        };
+                        let mut composed = false;
                         let shown = host::window_frame(window, aw, ah, |out, frame_area| {
                             // one GPU layer: QEMU reads it into the bitmap
                             if let (Some(p), Some(d)) = (gpu.as_deref_mut(), direct) {
@@ -808,11 +896,45 @@ impl Engine {
                                     }
                                 }
                             }
-                            if let Some(p) = gpu.as_deref_mut() {
-                                p.read_backings(&layers, buffers, area);
+                            composed = true;
+                            let region = repaint.unwrap_or(area);
+                            painted.stats[0] += 1;
+                            painted.stats[1] += repaint.is_none() as u64;
+                            painted.stats[2] += region.w.max(0) as u64 * region.h.max(0) as u64;
+                            if region.is_empty() {
+                                return;
                             }
-                            canvas.compose_into(out, aw, ah, &layers, buffers, area.x, area.y);
+                            let t0 = std::time::Instant::now();
+                            if let Some(p) = gpu.as_deref_mut() {
+                                p.read_backings_for(&layers, buffers, region, &mut painted.backed);
+                            }
+                            let clip = repaint.map(|r| Rect::new(r.x - area.x, r.y - area.y, r.w, r.h));
+                            canvas.compose_region(out, aw, ah, &layers, buffers, area.x, area.y, clip);
+                            painted.stats[5] += t0.elapsed().as_nanos() as u64;
                         });
+                        if debug() && painted.stats[0] >= 300 {
+                            let st = std::mem::take(&mut painted.stats);
+                            eprintln!(
+                                "airDroid: composed {} frames: {} whole, {} px on average, {:.2} ms reading and composing; {} buffers compared, {:.2} ms each",
+                                st[0],
+                                st[1],
+                                st[2] / st[0],
+                                st[5] as f64 / st[0] as f64 / 1e6,
+                                st[3],
+                                if st[3] > 0 { st[4] as f64 / st[3] as f64 / 1e6 } else { 0.0 }
+                            );
+                        }
+                        if composed {
+                            painted.frames = if same { (painted.frames + 1).min(2) } else { 1 };
+                            painted.changed = changed.map(|c| c.intersect(&area));
+                            painted.layers.clone_from(&layers);
+                            painted.area = Some(area);
+                            painted.size = (aw, ah);
+                        } else {
+                            // read straight into the bitmap, or no bitmap
+                            painted.frames = 0;
+                            painted.backed.clear();
+                        }
                         if !shown {
                             if let Some(p) = self.present.as_mut() {
                                 p.read_backings(&layers, &self.buffers, area);

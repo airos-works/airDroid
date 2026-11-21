@@ -156,6 +156,38 @@ out of buffers behind it. QEMU patch 0105 polls every millisecond
 while fences are pending. The same in Vulkan mode (4.6 / 5.9 ms);
 QEMU's CPU time for the test did not go up (7.5 s before, 6.6-7.2 s).
 
+## "Show Android" mode paints what changed (X399, 2026-11-22)
+
+A window of several layers (the whole of "Show Android" mode; an app
+window with a video surface or a menu) was read out of the GPU and
+blended whole for every frame: the Settings scroll test put 114 of
+Android's 232 frames on screen, with 48 % of them janky and 24 ms of
+airDroid's CPU time each.
+
+* The window's two bitmaps take turns, so a frame repaints what the
+  last two frames changed, and QEMU copies only that part of a layer
+  out of the GPU (patch 0106: a read of a part of a resource goes to
+  its place in the guest's backing).
+* The guest passes each layer's damage on (`Frame.damage`, one
+  rectangle a layer). "All of it" for the buffer a surface shows
+  already counts as nothing: Android's composer says that with every
+  commit of a layer it has no damage for.
+* A layer that says "all of it" with a new buffer is checked: the new
+  buffer is compared with the one before (0.7 ms for a screen). In this
+  mode SurfaceFlinger composes each task's "Background" layer itself
+  and hands its target over in another buffer every frame, with the
+  same picture.
+* What is left to blend goes in bands, a thread each, when it is large.
+
+After: 283-292 of Android's 292-305 frames on screen, 30 % janky, 8.7 ms
+of airDroid's CPU time a frame; a tenth of the screen repainted on
+average, 3.8 ms to read and compose it. The window is the same picture
+as Android's own screenshot (no pixel more than 5/255 off). What is
+left is SurfaceFlinger's composition target: 8 MB out of the GPU for
+every frame (6 ms in QEMU) to find that it has not changed. App windows
+of one layer (the usual case) never took this path: 323 of 326 frames,
+61 ms of CPU time for the whole test.
+
 ## "Show Android" mode and app starts (X399, 2026-11-21)
 
 Starting an app in "Show Android" mode took Android's UI down, in both
@@ -318,7 +350,11 @@ machine's Android after the hang above). airDroid now sets
       next start (no /var/log/previous_syslog). 62 further start and
       quit cycles, at four points of the guest's start and 14 of them
       right after a package reinstall as that one was, went through
-      without it. The default mode is unchanged by all this (X399:
+      without it. Again on 2026-11-22 09:10, as a Vulkan-mode session
+      that had run the scroll test was quit and the next one started;
+      again no text (the loader does reserve the fixed log buffer on
+      this machine, the restart does not keep it). Both times a session
+      that had done real GPU work was ending and the next beginning. The default mode is unchanged by all this (X399:
       19.7 s to boot, 94 ms for the scroll test).
    Tried earlier on Linux/KVM with lavapipe (QEMU on Xvfb, SDL GL):
    Android enumerates the Venus device and the render server starts,

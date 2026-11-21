@@ -1,0 +1,29 @@
+From: airDroid <airdroid@airos.works>
+Subject: [PATCH] airdroid present: parts of a resource into its guest backing
+
+A read into the guest backing took the box but put its rows at the start
+of the backing. The request's offset and stride now say where the part
+belongs, so the app can ask for the damaged part of a layer only.
+---
+--- a/hw/display/virtio-gpu-virgl.c
++++ b/hw/display/virtio-gpu-virgl.c
+@@ -1221,12 +1221,15 @@
+ {
+     if (req->area < 0) {
+         /* into the resource's own guest backing, as TRANSFER_FROM_HOST
+-           would (frames the app composes from guest RAM) */
+-        struct virtio_gpu_box all = {
++           would (frames the app composes from guest RAM); for a part of
++           the resource, offset is where the part starts in the backing
++           and stride the backing's (0: the resource's own) */
++        struct virtio_gpu_box part = {
+             .x = req->x, .y = req->y, .z = 0, .w = req->w, .h = req->h, .d = 1,
+         };
+-        return -virgl_renderer_transfer_read_iov(req->res, 0, 0, 0, 0, (struct virgl_box *)&all,
+-                                                 0, NULL, 0);
++        return -virgl_renderer_transfer_read_iov(req->res, 0, 0, req->stride, 0,
++                                                 (struct virgl_box *)&part,
++                                                 req->offset, NULL, 0);
+     }
+     size_t size = 0;
+     uint8_t *base = airdroid_area(req->area, &size);
