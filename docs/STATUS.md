@@ -178,15 +178,18 @@ virgl, not the host path.
         no sync fd export on fences and semaphores, and 8192 file
         descriptors for QEMU and the render server (NVK opens one per
         memory mapping; air/OS gives 256).
-      Open: one run crashed the render server and one hung right after
-      boot (not reproduced since; debug_server now writes reports for
-      it); GL consumers of a Vulkan-rendered buffer (SurfaceFlinger's
+      Open: of five runs, two showed and scrolled, two hung shortly
+      after boot (QEMU and the render server both waiting, no CPU use;
+      Debugger's report of the live QEMU has no stacks) and one crashed
+      the render server; GL consumers of a Vulkan-rendered buffer (SurfaceFlinger's
       own composition, screenshots) see the GL texture, not the shadow;
       a shadow is filled from GL once, when Venus attaches the buffer.
       Host bugs met on the way (air/OS, not airDroid): a render server
       that dies with host memory imported cannot be reaped (its team
       stays, the pages pinned), and the machine has reset or hung with
-      such teams around; see also the fork bug above.
+      such teams around; see also the fork bug above. The default mode
+      is the same on this branch as on main (X399: 19.2 s to boot, 96-102
+      ms for the scroll test).
    Tried earlier on Linux/KVM with lavapipe (QEMU on Xvfb, SDL GL):
    Android enumerates the Venus device and the render server starts,
    but rendering into gralloc buffers ends in "aborting on ring fatal
