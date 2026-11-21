@@ -115,7 +115,7 @@ Zink on NVK on NVIDIA's resource manager):
 | Settings cold start (`am start -W`, TotalTime) | 471-486 ms |
 | Clock cold start | 580 ms (WaitTime 587-818 ms) |
 | Scroll test (6 swipe pairs in Settings) | 305-331 frames, 0.3-0.7 % janky, every one on screen (302-326 host frames) |
-| Frame time, median / 90th / 99th percentile | 8-23 / 20-28 / 22-42 ms over six runs |
+| Frame time, median / 90th / 99th percentile | 8-26 / 20-29 / 22-48 ms over ten runs |
 | airDroid's own CPU time for the test | 94-107 ms |
 
 Measure with the app's window on screen: start it once with
