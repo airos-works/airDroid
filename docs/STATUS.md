@@ -269,7 +269,7 @@ machine's Android after the hang above). airDroid now sets
       them: see above), and the buffers are host memory imports.
       `virgl_render_server --vk-check` says whether a device has all
       of that, and the app asks it before it turns Venus on; without,
-      it stays with virgl and Android's lavapipe (a line on the app's
+      it does what "Automatic" does (virgl and Android's lavapipe on a GPU) (a line on the app's
       stderr says why). NVK on the GTX 1070 passes; lavapipe of Mesa
       22 (the test VM) does not: there Vulkan apps found no
       VK_KHR_swapchain and failed to start before the check existed.

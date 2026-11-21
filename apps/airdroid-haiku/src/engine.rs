@@ -460,8 +460,8 @@ impl Engine {
             ("none", _) | (_, None) => ("none".to_string(), Vec::new()),
             ("virgl", Some((env, _))) => ("virgl".to_string(), env),
             // experimental: Vulkan through Venus as well
+            // without it, what "auto" would do
             ("venus", Some((env, _))) if venus => ("venus".to_string(), env),
-            ("venus", Some((env, _))) => ("virgl".to_string(), env),
             (_, Some((env, true))) => ("virgl".to_string(), env),
             (_, Some(_)) => ("none".to_string(), Vec::new()), // llvmpipe only: SwiftShader is faster
         };
