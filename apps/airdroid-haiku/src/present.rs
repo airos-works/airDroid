@@ -17,6 +17,9 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+/// How long QEMU may take to read a frame (it takes 1-2 ms).
+const REPLY_TIMEOUT: Duration = Duration::from_millis(1000);
+
 /// struct airdroid_present_req in the QEMU patch.
 #[repr(C)]
 struct Request {
@@ -59,7 +62,14 @@ impl Present {
                 return Err("not connected".into());
             }
             match UnixStream::connect(&self.path) {
-                Ok(s) => self.stream = Some(s),
+                Ok(s) => {
+                    // a QEMU that stopped answering (its GL device lost, its
+                    // main loop stuck) must not stop the app with it: the
+                    // frame is dropped and the connection made again
+                    let _ = s.set_read_timeout(Some(REPLY_TIMEOUT));
+                    let _ = s.set_write_timeout(Some(REPLY_TIMEOUT));
+                    self.stream = Some(s);
+                }
                 Err(e) => {
                     self.retry_at = Instant::now() + Duration::from_millis(500);
                     return Err(format!("{}: {e}", self.path.display()));
@@ -72,7 +82,10 @@ impl Present {
         let bytes = unsafe { std::slice::from_raw_parts((&req as *const Request).cast::<u8>(), std::mem::size_of::<Request>()) };
         let mut status = [0u8; 4];
         if let Err(e) = s.write_all(bytes).and_then(|_| s.read_exact(&mut status)) {
+            // (also after a timeout: a late answer would be taken for the
+            // next request's)
             self.stream = None;
+            self.retry_at = Instant::now() + Duration::from_millis(500);
             return Err(format!("present socket: {e}"));
         }
         self.stats.0 += 1;
