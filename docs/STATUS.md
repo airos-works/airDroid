@@ -134,6 +134,40 @@ the graphics numbers to say more about nouveau than about Waydroid:
 on Linux this GTX 1070 has only nouveau, which cannot raise the card's
 clocks; boot and app start are the fair part.
 
+## "Show Android" mode and app starts (X399, 2026-11-21)
+
+Starting an app in "Show Android" mode took Android's UI down, in both
+gpu modes (found with the Godot editor): the hardware composer makes a
+new wl_buffer of the same dma-buf for every layer on every frame there,
+the guest compositor imported each one in full (map it, touch every
+page, read the page map, describe it to the host: 3 ms; 2672 imports in
+13 s with 9 buffers alive), fell behind, and stopped reading the
+composer's requests; the composer's libwayland found its socket full
+after about a second and the composer aborted.
+
+* One import per dma-buf, kept a second after its last wl_buffer; GEM
+  handles are counted (the kernel gives one handle per dma-buf, and the
+  first release used to close it under a second import); a destroyed
+  wl_buffer's contents stay until its surface gets another buffer.
+* The guest writes to the host through a thread (a write waits for
+  QEMU, which can be busy for seconds), and Android's sockets get 4 MiB
+  of send buffer, so a stall is no longer fatal.
+* The compositor says so on the VM console when its loop takes more
+  than 200 ms ("compositor held up ...").
+
+After: the same sequence (Show Android, start the app, recents, back,
+start it again, home) with the Godot editor on GL and on Vulkan and
+with Settings: no abort, nothing held up, frames at every step. The
+scroll test in the default mode is unchanged (325-327 frames on screen,
+median 19-20 ms) and airDroid's own CPU time for it went from 94-107 ms
+to 79-81 ms.
+
+Android's settings: when the host goes down while Android writes its
+settings files, Android starts them afresh and is no longer
+provisioned (Settings exits at once; this happened to the test
+machine's Android after the hang above). airDroid now sets
+`device_provisioned` again when a boot after the first finds it gone.
+
 ## Needs
 
 * air/OS with haiku 353344194f (NVMM page-protection fix), i.e. images from
@@ -219,11 +253,14 @@ clocks; boot and app start are the fair part.
       still had its pages pinned for a Vulkan import (delete_area()
       waits; the worker that waited also delivers the context's
       fences). Each import now maps the area by itself.
-      Open: GL consumers of a Vulkan-rendered buffer (SurfaceFlinger's
-      own composition, screenshots) see the GL texture, not the shadow;
-      a shadow is filled from GL once, when Venus attaches the buffer;
-      one render server crash early on was not seen again and not
-      explained.
+      GL users of a Vulkan-drawn buffer (SurfaceFlinger's own
+      composition, Android's screenshots, the recents view): a texture
+      whose resource has a shadow is written from the shadow before a
+      GL draw, blit or copy reads it (vrend_sync_shadow; one upload per
+      draw that samples it). Before, `screencap` showed a Vulkan app's
+      window black; now it shows what the window shows.
+      Open: one render server crash early on was not seen again and
+      not explained.
       A third-party app: the Godot 4.3 editor (its Android APK has
       x86_64 code) started with `--rendering-method mobile
       --rendering-driver vulkan` reports "Vulkan 1.3.325 - Forward
@@ -236,7 +273,10 @@ clocks; boot and app start are the fair part.
       Host bug met on the way (air/OS, not airDroid): the X399 reset or
       hung several times while a render server was stuck like that; a
       stuck process should not take the machine down. See also the
-      fork bug above. The default mode is unchanged by all this (X399:
+      fork bug above. Once more on 2026-11-21 22:02 without any render
+      server: the machine stopped a second after airDroid started a VM
+      in the default mode (nothing in the syslog after the start) and
+      was back by itself three minutes later; not explained. The default mode is unchanged by all this (X399:
       19.7 s to boot, 94 ms for the scroll test).
    Tried earlier on Linux/KVM with lavapipe (QEMU on Xvfb, SDL GL):
    Android enumerates the Venus device and the render server starts,
