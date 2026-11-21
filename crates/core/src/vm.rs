@@ -269,6 +269,49 @@ fn raise_fd_limit() {
     }
 }
 
+/// Whether this machine's Vulkan driver can carry Android's window buffers
+/// through Venus, asked of the render server ("--vk-check": the extensions
+/// the guest's driver wants before it offers Android a swapchain, and host
+/// memory import); the reason when it cannot. With such a driver Vulkan
+/// apps would get no window at all, where Android's own lavapipe draws
+/// them on the CPU.
+pub fn venus_check(server: &Path) -> Result<(), String> {
+    if !cfg!(target_os = "haiku") {
+        return Ok(());
+    }
+    let mut child = Command::new(server)
+        .arg("--vk-check")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("{}: {e}", server.display()))?;
+    // a driver that hangs must not hang the start
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("the Vulkan driver did not answer".into());
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    if status.success() {
+        return Ok(());
+    }
+    let mut out = String::new();
+    if let Some(mut o) = child.stdout.take() {
+        use std::io::Read;
+        let _ = o.read_to_string(&mut out);
+    }
+    let said: Vec<&str> = out.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    Err(if said.is_empty() { format!("the check failed ({status})") } else { said.join("; ") })
+}
+
 /// Starts virglrenderer's render server on one end of a socket pair
 /// (SOCK_SEQPACKET, what its protocol needs) and returns the other end, which
 /// the next child (QEMU) inherits. The server exits when that end closes.

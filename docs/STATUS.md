@@ -262,6 +262,17 @@ machine's Android after the hang above). airDroid now sets
       GL draw, blit or copy reads it (vrend_sync_shadow; one upload per
       draw that samples it). Before, `screencap` showed a Vulkan app's
       window black; now it shows what the window shows.
+      Which hosts: the guest's driver offers Android a swapchain only
+      when the host's Vulkan driver lists external memory as dma-buf,
+      image DRM format modifiers, foreign queue families and external
+      fence and semaphore fds (it need not be able to export any of
+      them: see above), and the buffers are host memory imports.
+      `virgl_render_server --vk-check` says whether a device has all
+      of that, and the app asks it before it turns Venus on; without,
+      it does what "Automatic" does (virgl and Android's lavapipe on a GPU) (a line on the app's
+      stderr says why). NVK on the GTX 1070 passes; lavapipe of Mesa
+      22 (the test VM) does not: there Vulkan apps found no
+      VK_KHR_swapchain and failed to start before the check existed.
       Open: one render server crash early on was not seen again and
       not explained.
       A third-party app: the Godot 4.3 editor (its Android APK has
@@ -279,7 +290,13 @@ machine's Android after the hang above). airDroid now sets
       fork bug above. Once more on 2026-11-21 22:02 without any render
       server: the machine stopped a second after airDroid started a VM
       in the default mode (nothing in the syslog after the start) and
-      was back by itself three minutes later; not explained. The default mode is unchanged by all this (X399:
+      was back by itself three minutes later. That was a kernel panic
+      (the machine has `panic_reboot_timeout 120`: two minutes in the
+      kernel debugger, then a restart), but its text did not reach the
+      next start (no /var/log/previous_syslog). 62 further start and
+      quit cycles, at four points of the guest's start and 14 of them
+      right after a package reinstall as that one was, went through
+      without it. The default mode is unchanged by all this (X399:
       19.7 s to boot, 94 ms for the scroll test).
    Tried earlier on Linux/KVM with lavapipe (QEMU on Xvfb, SDL GL):
    Android enumerates the Venus device and the render server starts,

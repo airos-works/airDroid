@@ -1,3 +1,102 @@
+--- a/server/main.c
++++ b/server/main.c
+@@ -24,9 +24,96 @@
+  * from its start function.  In this case, render_context_main must be
+  * thread-safe.
+  */
++#ifdef __HAIKU__
++#include <stdio.h>
++#include <string.h>
++#include <vulkan/vulkan.h>
++
++/* "--vk-check": does a Vulkan device of this machine have what Android's
++ * window buffers need through Venus? The guest's driver offers
++ * VK_ANDROID_native_buffer (and with it Android a swapchain) only when the
++ * renderer lists these, and the buffers themselves are host memory imports
++ * (virgl_shm.h). Without them Vulkan apps get no window at all, where
++ * Android's own lavapipe would at least draw them on the CPU: the caller
++ * then leaves Venus off. Prints one line per device; 0 when one will do.
++ */
++static int
++vk_check(void)
++{
++   static const char *const needed[] = {
++      "VK_KHR_external_memory_fd",
++      "VK_EXT_external_memory_dma_buf",
++      "VK_EXT_image_drm_format_modifier",
++      "VK_EXT_queue_family_foreign",
++      "VK_KHR_external_fence_fd",
++      "VK_KHR_external_semaphore_fd",
++      "VK_EXT_external_memory_host",
++   };
++   const uint32_t needed_count = sizeof(needed) / sizeof(needed[0]);
++
++   const VkApplicationInfo app = {
++      .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
++      .pApplicationName = "airDroid",
++      .apiVersion = VK_API_VERSION_1_1,
++   };
++   const VkInstanceCreateInfo info = {
++      .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
++      .pApplicationInfo = &app,
++   };
++   VkInstance instance;
++   if (vkCreateInstance(&info, NULL, &instance) != VK_SUCCESS) {
++      printf("no Vulkan instance\n");
++      return 2;
++   }
++
++   VkPhysicalDevice devs[8];
++   uint32_t dev_count = 8;
++   VkResult result = vkEnumeratePhysicalDevices(instance, &dev_count, devs);
++   if (result != VK_SUCCESS && result != VK_INCOMPLETE)
++      dev_count = 0;
++
++   int ret = 1;
++   if (!dev_count)
++      printf("no Vulkan device\n");
++   for (uint32_t i = 0; i < dev_count; i++) {
++      VkPhysicalDeviceProperties p;
++      vkGetPhysicalDeviceProperties(devs[i], &p);
++
++      static VkExtensionProperties exts[512];
++      uint32_t ext_count = 512;
++      result = vkEnumerateDeviceExtensionProperties(devs[i], NULL, &ext_count, exts);
++      if (result != VK_SUCCESS && result != VK_INCOMPLETE)
++         ext_count = 0;
++
++      uint32_t missing = 0;
++      printf("%s:", p.deviceName);
++      for (uint32_t n = 0; n < needed_count; n++) {
++         bool found = false;
++         for (uint32_t e = 0; e < ext_count && !found; e++)
++            found = !strcmp(exts[e].extensionName, needed[n]);
++         if (!found) {
++            printf(" no %s", needed[n]);
++            missing++;
++         }
++      }
++      printf(missing ? "\n" : " ok\n");
++      if (!missing)
++         ret = 0;
++   }
++
++   vkDestroyInstance(instance, NULL);
++   return ret;
++}
++#endif
++
+ int
+ main(int argc, char **argv)
+ {
++#ifdef __HAIKU__
++   if (argc == 2 && !strcmp(argv[1], "--vk-check"))
++      return vk_check();
++#endif
++
+    render_log_init();
+ 
+    struct render_context_args ctx_args;
 --- a/server/render_context.c
 +++ b/server/render_context.c
 @@ -9,6 +9,7 @@
