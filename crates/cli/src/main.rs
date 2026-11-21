@@ -12,6 +12,9 @@
 
 use airdroid_core::control::{call, Request};
 use std::path::PathBuf;
+// stderr may be gone (a closed ssh session): eprintln! would panic, which
+// aborts here
+use std::io::Write as _;
 
 fn state_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/boot/home".into());
@@ -19,7 +22,7 @@ fn state_dir() -> PathBuf {
 }
 
 fn usage() -> ! {
-    eprintln!(
+    let _ = writeln!(std::io::stderr(), 
         "usage: airdroid status | shell [-u UID] [--vm] COMMAND... | logcat [ARGS...]\n\
          \x20      | app install FILE.apk | app remove PACKAGE | app launch PACKAGE | app list\n\
          \x20      | app intent ACTION [URI] | show-full-ui | prop get KEY | prop set KEY VALUE | upgrade | stop"
@@ -74,7 +77,7 @@ fn main() {
         }
         ["app", "install", file] => {
             let p = std::fs::canonicalize(file).unwrap_or_else(|e| {
-                eprintln!("airdroid: {file}: {e}");
+                let _ = writeln!(std::io::stderr(), "airdroid: {file}: {e}");
                 std::process::exit(1)
             });
             Request::Install { path: p.to_string_lossy().into_owned() }
@@ -91,7 +94,7 @@ fn main() {
     match call(&state_dir(), &req) {
         Ok(code) => std::process::exit(code),
         Err(e) => {
-            eprintln!("airdroid: {e}");
+            let _ = writeln!(std::io::stderr(), "airdroid: {e}");
             std::process::exit(1)
         }
     }
