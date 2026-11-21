@@ -300,13 +300,15 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  
  #include "venus-protocol/vn_protocol_renderer_transport.h"
  
-@@ -248,7 +249,35 @@
+@@ -248,7 +249,47 @@
     VkImportMemoryResourceInfoMESA *res_info = NULL;
     VkBaseInStructure *prev_of_res_info = vkr_find_prev_struct(
        alloc_info, VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA);
 -   if (prev_of_res_info) {
 +   VkImportMemoryHostPointerInfoEXT res_host_info;
 +   struct vkr_resource *shm_res = NULL;
++   void *res_import_ptr = NULL;
++   uint64_t res_import_size = 0;
 +   if (prev_of_res_info && physical_dev->host_pointer_import) {
 +      /* a resource that is shared memory of ours (a typed resource's shadow,
 +       * where there are no dma-bufs): imported as host memory
@@ -325,11 +327,21 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 +         args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
 +         return;
 +      }
++      /* the import's own mapping (virgl_shm_clone()): the resource may go
++       * before the memory does
++       */
++      void *import_ptr = virgl_shm_clone(shm_res->u.data);
++      if (!import_ptr) {
++         args->ret = VK_ERROR_OUT_OF_HOST_MEMORY;
++         return;
++      }
++      res_import_ptr = import_ptr;
++      res_import_size = (shm_res->size + align - 1) / align * align;
 +      res_host_info = (const VkImportMemoryHostPointerInfoEXT){
 +         .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
 +         .pNext = res_info->pNext,
 +         .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
-+         .pHostPointer = shm_res->u.data,
++         .pHostPointer = import_ptr,
 +      };
 +      prev_of_res_info->pNext = (const struct VkBaseInStructure *)&res_host_info;
 +      alloc_info->allocationSize = size;
@@ -337,7 +349,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
        res_info = (VkImportMemoryResourceInfoMESA *)prev_of_res_info->pNext;
        if (!vkr_get_fd_info_from_resource_info(ctx, res_info, &local_import_info)) {
           args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
-@@ -280,8 +309,42 @@
+@@ -280,8 +321,42 @@
     uint32_t valid_fd_types = 0;
     int udmabuf_fd = -1;
     void *gbm_bo = NULL;
@@ -381,7 +393,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
        /* An implementation can support dma_buf import along with opaque fd export/import.
         * If the client driver is using external memory and requesting dma_buf, without
         * dma_buf fd export support, we must use gbm bo import path instead of forcing
-@@ -369,10 +432,18 @@
+@@ -369,10 +444,20 @@
  
     struct vkr_device_memory *mem = vkr_device_memory_create_and_add(ctx, args);
     if (!mem) {
@@ -397,20 +409,22 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 +         virgl_shm_unmap(shm_ptr, shm_size);
 +         close(shm_fd);
 +      }
++      if (res_import_ptr)
++         virgl_shm_unmap(res_import_ptr, res_import_size);
        return;
     }
  
-@@ -381,6 +452,9 @@
+@@ -381,6 +466,9 @@
     mem->property_flags = property_flags;
     mem->valid_fd_types = valid_fd_types;
     mem->udmabuf_fd = udmabuf_fd;
 +   mem->shm_fd = shm_fd;
-+   mem->shm_ptr = shm_ptr;
-+   mem->shm_size = shm_size;
++   mem->shm_ptr = shm_ptr ? shm_ptr : res_import_ptr;
++   mem->shm_size = shm_ptr ? shm_size : res_import_size;
     mem->gbm_bo = gbm_bo;
     mem->allocation_size = alloc_info->allocationSize;
     mem->memory_type_index = mem_type_index;
-@@ -395,8 +469,16 @@
+@@ -395,8 +483,16 @@
     if (!mem)
        return;
  
@@ -427,7 +441,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  }
  
  static void
-@@ -440,6 +522,28 @@
+@@ -440,6 +536,28 @@
        return;
     }
  
@@ -456,7 +470,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
     if (res->fd_type != VIRGL_RESOURCE_FD_DMABUF) {
        args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
        return;
-@@ -494,6 +598,10 @@
+@@ -494,6 +612,10 @@
        vkr_gbm_bo_destroy(mem->gbm_bo);
     if (mem->udmabuf_fd >= 0)
        close(mem->udmabuf_fd);
@@ -467,7 +481,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  }
  
  bool
-@@ -527,6 +635,26 @@
+@@ -527,6 +649,26 @@
                                        : VIRGL_RENDERER_MAP_CACHE_WC;
     }
  
@@ -1050,7 +1064,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  
 --- a/src/virgl_shm.h
 +++ b/src/virgl_shm.h
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,199 @@
 +/*
 + * Copyright 2026 the airDroid project
 + * SPDX-License-Identifier: MIT
@@ -1078,6 +1092,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 +#include <unistd.h>
 +
 +#include "util/anon_file.h"
++#include "util/macros.h"
 +
 +#ifdef __HAIKU__
 +
@@ -1159,6 +1174,27 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 +   return addr;
 +}
 +
++/* Another mapping of what virgl_shm_create() or virgl_shm_map() mapped at
++ * ptr, to be unmapped by itself; NULL if that fails. For memory a driver
++ * pins (a host pointer import): an area with pinned pages cannot be deleted
++ * until they are released (delete_area() waits, for good if the import
++ * outlives it), so the import gets a mapping of its own and the original
++ * can go whenever its owner is done with it.
++ */
++static inline void *
++virgl_shm_clone(void *ptr)
++{
++   const area_id area = area_for(ptr);
++   area_info info;
++   if (area < 0 || get_area_info(area, &info) != B_OK || info.address != ptr)
++      return NULL;
++
++   void *addr = NULL;
++   const area_id clone = clone_area("virgl shm import", &addr, B_ANY_ADDRESS,
++                                    B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA, area);
++   return clone < 0 ? NULL : addr;
++}
++
 +/* How much memory fd names (a multiple of the page size here). */
 +static inline uint64_t
 +virgl_shm_size(int fd)
@@ -1210,6 +1246,13 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 +virgl_shm_size(int fd)
 +{
 +   return lseek(fd, 0, SEEK_END);
++}
++
++static inline void *
++virgl_shm_clone(UNUSED void *ptr)
++{
++   /* only where memory is imported by host pointer */
++   return NULL;
 +}
 +
 +static inline int
