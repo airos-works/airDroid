@@ -149,11 +149,20 @@ virgl, not the host path.
       opaque-fd export) but can be imported
       (`VK_EXT_external_memory_host`): vkr allocates such memory as a
       shared locked area and imports it.
-   4. Android's window buffers: gralloc hands Vulkan apps buffers that
-      are GL (virgl) resources, which Venus can only use when the host
-      exports them as dma-bufs. Needs either that export in nvidia_rm
-      and NVK, or gralloc buffers both renderers can use (shared-memory
-      blobs). Open research.
+   4. Android's window buffers, open. Probed in the nested VM (Android's
+      UI on Vulkan, `debug.hwui.renderer=skiavk`): HWUI aborts with
+      "Assertion failed: !hasKHRSwapchainExtension". Mesa's Venus
+      driver in the guest offers VK_ANDROID_native_buffer (which
+      Android's swapchain is built on) only when the host renderer has
+      dma-buf import, VK_EXT_image_drm_format_modifier,
+      VK_EXT_queue_family_foreign, and sync-fd fence export and
+      semaphore import. air/OS has no dma-bufs or sync files (NVK on
+      NVIDIA's RM lists the extensions and cannot do either; lavapipe
+      22 lacks them). Plan: emulate them in vkr on air/OS. A gralloc
+      buffer a Vulkan app renders to gets a shared locked area as its
+      memory (host pointer import, linear), which QEMU's present path
+      then reads instead of the GL texture (no GPU read-back at all);
+      fences and semaphores are waited for and signalled in vkr.
    Tried earlier on Linux/KVM with lavapipe (QEMU on Xvfb, SDL GL):
    Android enumerates the Venus device and the render server starts,
    but rendering into gralloc buffers ends in "aborting on ring fatal
