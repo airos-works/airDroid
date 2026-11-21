@@ -36,11 +36,11 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it fits together,
 <!-- airos-ci:latest-builds:start -->
 ## Latest builds
 
-Built automatically by air/OS CI from commit `8b30e43` on 2026-11-21 ([all files](https://github.com/airos-works/airDroid/releases/tag/latest)).
+Built automatically by air/OS CI from commit `ea6fc11` on 2026-11-21 ([all files](https://github.com/airos-works/airDroid/releases/tag/latest)).
 
 | Architecture | Package |
 |---|---|
-| x86_64 | [airdroid-0.1.0-94-x86_64.hpkg](https://github.com/airos-works/airDroid/releases/download/latest/airdroid-0.1.0-94-x86_64.hpkg) |
+| x86_64 | [airdroid-0.1.0-97-x86_64.hpkg](https://github.com/airos-works/airDroid/releases/download/latest/airdroid-0.1.0-97-x86_64.hpkg) |
 
 Install with `pkgman install <file>`, or copy the file into `/boot/system/packages`. Haiku SDK: x86_64 hrev60207-2823-ge7d4fcf6c0, arm64 hrev60207-2823-ge7d4fcf6c0.
 <!-- airos-ci:latest-builds:end -->
