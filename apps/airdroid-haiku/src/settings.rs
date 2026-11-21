@@ -19,7 +19,8 @@ pub struct Settings {
     pub flavour: String,
     /// Send mouse clicks as touches (some games want touch).
     pub mouse_as_touch: bool,
-    /// "auto" (virgl when there is a GPU with EGL), "virgl" or "none".
+    /// "auto" (virgl when there is a GPU with EGL), "virgl" or "none";
+    /// "venus" (virgl and Vulkan through Venus, experimental) only by hand.
     pub gpu: String,
     /// The folder shared with Android (as /sdcard/airOS); "~/" is the home
     /// folder, empty shares nothing.
