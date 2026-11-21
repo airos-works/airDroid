@@ -159,6 +159,25 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  }
  
  static bool
+--- a/src/proxy/proxy_socket.c
++++ b/src/proxy/proxy_socket.c
+@@ -99,6 +99,16 @@
+ static bool
+ proxy_socket_recvmsg(struct proxy_socket *socket, struct msghdr *msg)
+ {
++   /* The caller (the VMM's main thread) waits for the server here with the
++    * whole machine behind it: say so when that takes long.
++    */
++   for (int waited = 0;; waited += 3) {
++      struct pollfd pfd = { .fd = socket->fd, .events = POLLIN };
++      if (poll(&pfd, 1, 3000) != 0)
++         break;
++      proxy_log("no reply from the render server for %d s", waited + 3);
++   }
++
+    do {
+       const ssize_t s = recvmsg(socket->fd, msg, MSG_CMSG_CLOEXEC);
+       if (unlikely(s < 0)) {
 --- a/src/venus/vkr_context.c
 +++ b/src/venus/vkr_context.c
 @@ -3,6 +3,7 @@
@@ -760,7 +779,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  static void
  vkr_dispatch_vkResetFenceResourceMESA(struct vn_dispatch_context *dispatch,
                                        struct vn_command_vkResetFenceResourceMESA *args)
-@@ -481,6 +512,19 @@
+@@ -481,6 +512,21 @@
  
     vn_replace_vkResetFenceResourceMESA_args_handle(args);
  
@@ -770,6 +789,8 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 +       */
 +      VkResult result = vk->WaitForFences(args->device, 1, &args->fence, VK_TRUE,
 +                                          5ull * 1000 * 1000 * 1000);
++      if (result == VK_TIMEOUT)
++         vkr_log("a fence exported as a sync fd was not signalled within 5 s");
 +      if (result == VK_SUCCESS || result == VK_TIMEOUT)
 +         result = vk->ResetFences(args->device, 1, &args->fence);
 +      if (result != VK_SUCCESS)
@@ -780,7 +801,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
     const VkFenceGetFdInfoKHR info = {
        .sType = VK_STRUCTURE_TYPE_FENCE_GET_FD_INFO_KHR,
        .fence = args->fence,
-@@ -500,6 +544,18 @@
+@@ -500,6 +546,18 @@
  vkr_dispatch_vkCreateSemaphore(struct vn_dispatch_context *dispatch,
                                 struct vn_command_vkCreateSemaphore *args)
  {
@@ -799,32 +820,28 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
     vkr_semaphore_create_and_add(dispatch->data, args);
  }
  
-@@ -555,6 +611,24 @@
+@@ -555,6 +613,20 @@
  
     vn_replace_vkWaitSemaphoreResourceMESA_args_handle(args);
  
 +   if (vkr_device_emulates_sync_fd(dev)) {
-+      /* Exporting a sync fd takes the semaphore's signal: a submission that
-+       * waits for it does the same.
++      /* Exporting a sync fd takes the semaphore's signal. The only way to
++       * take it here is a submission that waits for it, and one whose
++       * semaphore is never signalled on this queue stalls the queue for
++       * good (every later submission, the client's fences with them: seen
++       * as Android hanging with everything idle). The clients that export
++       * (Android's UI: a semaphore a frame, destroyed after) do not signal
++       * the semaphore again, so it is left signalled.
 +       */
-+      const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-+      const VkSubmitInfo submit = {
-+         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-+         .waitSemaphoreCount = 1,
-+         .pWaitSemaphores = &args->semaphore,
-+         .pWaitDstStageMask = &stage,
-+      };
-+      const VkQueue queue = vkr_device_any_queue(dev);
-+      if (queue == VK_NULL_HANDLE ||
-+          vk->QueueSubmit(queue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS)
-+         vkr_context_set_fatal(ctx);
++      (void)vk;
++      (void)ctx;
 +      return;
 +   }
 +
     const VkSemaphoreGetFdInfoKHR info = {
        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
        .semaphore = args->semaphore,
-@@ -586,6 +660,20 @@
+@@ -586,6 +658,20 @@
     /* resourceId 0 is for importing a signaled payload to sync_fd fence */
     assert(!res_info->resourceId);
  
