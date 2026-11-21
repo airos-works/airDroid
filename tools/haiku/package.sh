@@ -29,6 +29,8 @@ mkdir -p "$STAGE"/{apps,bin,data/airDroid/firmware,lib/airDroid,boot/post-instal
 cp "$B/vmlinuz" "$B/initramfs.img" "$STAGE/data/airDroid/"
 cp "$B"/qemu/firmware/* "$STAGE/data/airDroid/firmware/"
 cp "$B/qemu/qemu-system-x86_64" "$STAGE/lib/airDroid/"
+# Venus' render server (gpu=venus), started by QEMU
+[[ ! -f $B/qemu/virgl_render_server ]] || cp "$B/qemu/virgl_render_server" "$STAGE/lib/airDroid/"
 # QEMU's GL libraries (GPU=1 build): libepoxy, virglrenderer, pixman
 if [[ -d $B/qemu/lib ]]; then
 	mkdir -p "$STAGE/lib/airDroid/lib"

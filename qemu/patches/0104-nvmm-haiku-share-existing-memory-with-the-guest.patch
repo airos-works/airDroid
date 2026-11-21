@@ -1,0 +1,256 @@
+--- a/hw/display/virtio-gpu-virgl.c
++++ b/hw/display/virtio-gpu-virgl.c
+@@ -1308,6 +1308,22 @@
+     g_unix_fd_add(fd, G_IO_IN, airdroid_present_accept, g);
+ }
+ 
++#if defined(__HAIKU__) && VIRGL_RENDERER_CALLBACKS_VERSION >= 3
++/*
++ * airDroid: Venus' render server is started by the app, which hands us one
++ * end of a socket pair (AIRDROID_RENDER_SERVER_FD), instead of
++ * virglrenderer forking it from here: QEMU has a GPU device of its own by
++ * then (virgl's GL), and on air/OS a process that forks with a live Vulkan
++ * device on NVIDIA's resource manager takes the machine down.
++ */
++static int virgl_get_server_fd(void *opaque, uint32_t version)
++{
++    const char *fd = getenv("AIRDROID_RENDER_SERVER_FD");
++
++    return fd != NULL && *fd != '\0' ? atoi(fd) : -1;
++}
++#endif
++
+ int virtio_gpu_virgl_init(VirtIOGPU *g)
+ {
+     int ret;
+@@ -1331,6 +1347,21 @@
+     }
+ #endif
+ 
++#if defined(__HAIKU__) && VIRGL_RENDERER_CALLBACKS_VERSION >= 3
++    if (getenv("AIRDROID_RENDER_SERVER_FD") != NULL) {
++        virtio_gpu_3d_cbs.get_server_fd = virgl_get_server_fd;
++    }
++#endif
++#ifdef __HAIKU__
++    /*
++     * airDroid: with blob resources on (Venus), vrend would also offer the
++     * guest's GL persistently mapped buffers, which map the host GL
++     * driver's own memory into the guest; NVMM on air/OS only takes fully
++     * locked areas (what the Venus renderer shares).
++     */
++    flags |= VIRGL_RENDERER_USE_EXTERNAL_BLOB;
++#endif
++
+     ret = virgl_renderer_init(g, flags, &virtio_gpu_3d_cbs);
+     if (ret != 0) {
+         error_report("virgl could not be initialized: %d", ret);
+--- a/target/i386/nvmm/nvmm-all.c
++++ b/target/i386/nvmm/nvmm-all.c
+@@ -16,6 +16,8 @@
+ #include "system/nvmm.h"
+ #include "system/cpus.h"
+ #include "system/memory.h"
++#include "system/ramblock.h"
++#include "system/ram_addr.h"
+ #include "system/runstate.h"
+ #include "qemu/main-loop.h"
+ #include "qemu/error-report.h"
+@@ -1019,6 +1021,28 @@
+         return -err;
+     }
+ 
++#ifdef __HAIKU__
++    /*
++     * airDroid: a guest of air/OS's NVMM has 128 GiB of physical address
++     * space (NVMM_MAX_RAM), but would see the host's address width, and
++     * firmware and Linux put large 64-bit device windows (virtio-gpu's
++     * host memory window for blobs) near the top of what the processor
++     * says it has, where NVMM maps nothing. Say 37 bits.
++     */
++    memset(&cpuid, 0, sizeof(cpuid));
++    cpuid.mask = 1;
++    cpuid.leaf = 0x80000008;
++    /* (a bit may not be both cleared and set) */
++    cpuid.u.mask.del.eax = 0xff & ~37;
++    cpuid.u.mask.set.eax = 37;
++    ret = nvmm_vcpu_configure(mach, &qcpu->vcpu, NVMM_VCPU_CONF_CPUID,
++        &cpuid);
++    if (ret == -1) {
++        warn_report("NVMM: could not limit the guest's physical address "
++            "width, error=%d", errno);
++    }
++#endif
++
+     ret = nvmm_vcpu_configure(mach, &qcpu->vcpu, NVMM_VCPU_CONF_CALLBACKS,
+         &nvmm_callbacks);
+     if (ret == -1) {
+@@ -1083,6 +1107,42 @@
+ 
+ /* -------------------------------------------------------------------------- */
+ 
++#ifdef __HAIKU__
++/* host address -> size of what went through nvmm_hva_map_existing() */
++static GHashTable *nvmm_haiku_existing;
++
++/* Not guest RAM for the cooperating process' map: a renderer's memory. */
++static bool
++nvmm_haiku_is_existing(uintptr_t hva)
++{
++    return nvmm_haiku_existing != NULL
++        && g_hash_table_contains(nvmm_haiku_existing, (void *)hva);
++}
++
++/* handed-in memory NVMM would not take: host address -> size */
++static GHashTable *nvmm_haiku_refused;
++
++/* Whether hva lies in memory that could not be registered: the guest does
++   not get it at all (it must not get other memory in its place). */
++static bool
++nvmm_haiku_is_refused(uintptr_t hva)
++{
++    GHashTableIter iter;
++    gpointer host, size;
++
++    if (nvmm_haiku_refused == NULL) {
++        return false;
++    }
++    g_hash_table_iter_init(&iter, nvmm_haiku_refused);
++    while (g_hash_table_iter_next(&iter, &host, &size)) {
++        if (hva >= (uintptr_t)host && hva - (uintptr_t)host < (size_t)size) {
++            return true;
++        }
++    }
++    return false;
++}
++#endif
++
+ static void
+ nvmm_update_mapping(hwaddr start_pa, ram_addr_t size, uintptr_t hva,
+     bool add, bool rom, const char *name)
+@@ -1097,13 +1157,13 @@
+         }
+         ret = nvmm_gpa_map(mach, hva, start_pa, size, prot);
+ #ifdef __HAIKU__
+-        if (ret == 0 && !rom) {
++        if (ret == 0 && !rom && !nvmm_haiku_is_existing(hva)) {
+             nvmm_haiku_log_mapping(start_pa, size, hva, true);
+         }
+ #endif
+     } else {
+ #ifdef __HAIKU__
+-        if (!rom) {
++        if (!rom && !nvmm_haiku_is_existing(hva)) {
+             nvmm_haiku_log_mapping(start_pa, size, hva, false);
+         }
+ #endif
+@@ -1147,6 +1207,12 @@
+     hva = (uintptr_t)memory_region_get_ram_ptr(mr) +
+         section->offset_within_region + delta;
+ 
++#ifdef __HAIKU__
++    if (nvmm_haiku_is_refused(hva)) {
++        return;
++    }
++#endif
++
+     nvmm_update_mapping(start_pa, size, hva, add,
+         memory_region_is_rom(mr), mr->name);
+ }
+@@ -1199,6 +1265,74 @@
+     .priority = MEMORY_LISTENER_PRIORITY_ACCEL,
+ };
+ 
++#ifdef __HAIKU__
++/*
++ * airDroid: memory QEMU was handed (memory_region_init_ram_ptr(): a
++ * virtio-gpu blob, shared with the renderer's process) has to stay what it
++ * is, where nvmm_hva_map() would replace it with new anonymous memory.
++ * air/OS's NVMM takes such memory with nvmm_hva_map_existing() (a fully
++ * locked area; libnvmm has it since November 2026, hence weak).
++ */
++extern int nvmm_hva_map_existing(struct nvmm_machine *, uintptr_t, size_t)
++    __attribute__((weak));
++
++/* Whether host is such memory (then NVMM has it, or the guest goes
++   without: nvmm_hva_map() must not replace it). */
++static bool
++nvmm_haiku_map_existing(struct nvmm_machine *mach, void *host, size_t size)
++{
++    ram_addr_t offset;
++    RAMBlock *rb;
++    bool prealloc;
++
++    WITH_RCU_READ_LOCK_GUARD() {
++        rb = qemu_ram_block_from_host(host, false, &offset);
++        prealloc = rb != NULL && (rb->flags & RAM_PREALLOC) != 0;
++    }
++    if (!prealloc) {
++        return false;
++    }
++    if (nvmm_hva_map_existing == NULL
++        || nvmm_hva_map_existing(mach, (uintptr_t)host, size) == -1) {
++        warn_report("NVMM: cannot share HostVA:%p Size:%p with the guest "
++            "(%s); the guest does not get it", host, (void *)size,
++            nvmm_hva_map_existing == NULL ? "this air/OS is too old"
++                : "not a fully locked area, see the syslog");
++        if (nvmm_haiku_refused == NULL) {
++            nvmm_haiku_refused = g_hash_table_new(NULL, NULL);
++        }
++        g_hash_table_insert(nvmm_haiku_refused, host, (gpointer)size);
++        return true;
++    }
++    if (nvmm_haiku_existing == NULL) {
++        nvmm_haiku_existing = g_hash_table_new(NULL, NULL);
++    }
++    g_hash_table_insert(nvmm_haiku_existing, host, (gpointer)size);
++    return true;
++}
++
++static void
++nvmm_ram_block_removed(RAMBlockNotifier *n, void *host, size_t size,
++                       size_t max_size)
++{
++    gpointer mapped;
++
++    if (nvmm_haiku_refused != NULL) {
++        g_hash_table_remove(nvmm_haiku_refused, host);
++    }
++    if (nvmm_haiku_existing != NULL
++        && g_hash_table_lookup_extended(nvmm_haiku_existing, host, NULL,
++            &mapped)) {
++        g_hash_table_remove(nvmm_haiku_existing, host);
++        if (nvmm_hva_unmap(get_nvmm_mach(), (uintptr_t)host,
++                (size_t)mapped) == -1) {
++            error_report("NVMM: Failed to unmap HVA, HostVA:%p error=%d",
++                host, errno);
++        }
++    }
++}
++#endif
++
+ static void
+ nvmm_ram_block_added(RAMBlockNotifier *n, void *host, size_t size,
+                      size_t max_size)
+@@ -1207,6 +1341,11 @@
+     uintptr_t hva = (uintptr_t)host;
+     int ret;
+ 
++#ifdef __HAIKU__
++    if (nvmm_haiku_map_existing(mach, host, max_size)) {
++        return;
++    }
++#endif
+     ret = nvmm_hva_map(mach, hva, max_size);
+ #ifdef __HAIKU__
+     if (ret == 0) {
+@@ -1227,6 +1366,9 @@
+ }
+ 
+ static struct RAMBlockNotifier nvmm_ram_notifier = {
++#ifdef __HAIKU__
++    .ram_block_removed = nvmm_ram_block_removed,
++#endif
+     .ram_block_added = nvmm_ram_block_added
+ };
+ 

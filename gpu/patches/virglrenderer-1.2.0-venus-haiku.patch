@@ -1,0 +1,637 @@
+--- a/server/render_context.c
++++ b/server/render_context.c
+@@ -9,6 +9,7 @@
+ 
+ #include "util/u_thread.h"
+ #include "virgl_util.h"
++#include "virgl_shm.h"
+ 
+ #include "render_state.h"
+ 
+@@ -136,12 +137,12 @@
+    const int shmem_fd = fds[0];
+    const int fence_eventfd = fd_count == 2 ? fds[1] : -1;
+ 
+-   void *shmem_ptr = mmap(NULL, req->shmem_size, PROT_WRITE, MAP_SHARED, shmem_fd, 0);
++   void *shmem_ptr = virgl_shm_map(shmem_fd, req->shmem_size);
+    if (shmem_ptr == MAP_FAILED)
+       return false;
+ 
+    if (!render_state_create_context(ctx, req->flags, ctx->name_len, ctx->name)) {
+-      munmap(shmem_ptr, req->shmem_size);
++      virgl_shm_unmap(shmem_ptr, req->shmem_size);
+       return false;
+    }
+ 
+@@ -254,7 +255,7 @@
+    render_state_destroy_context(ctx->ctx_id);
+ 
+    if (ctx->shmem_ptr)
+-      munmap(ctx->shmem_ptr, ctx->shmem_size);
++      virgl_shm_unmap(ctx->shmem_ptr, ctx->shmem_size);
+    if (ctx->shmem_fd >= 0)
+       close(ctx->shmem_fd);
+ 
+--- a/server/render_worker.c
++++ b/server/render_worker.c
+@@ -24,7 +24,9 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <signal.h>
++#ifndef ENABLE_RENDER_SERVER_WORKER_THREAD
+ #include <sys/signalfd.h>
++#endif
+ #include <sys/types.h>
+ #include <sys/wait.h>
+ #include <threads.h>
+@@ -321,6 +323,10 @@
+    if (jail->sigchld_fd < 0)
+       return true;
+ 
++#ifdef ENABLE_RENDER_SERVER_WORKER_THREAD
++   /* thread workers: no SIGCHLD fd (and no signalfd() everywhere) */
++   return true;
++#else
+    do {
+       struct signalfd_siginfo siginfos[8];
+       const ssize_t r = read(jail->sigchld_fd, siginfos, sizeof(siginfos));
+@@ -334,6 +340,7 @@
+    } while (true);
+ 
+    return true;
++#endif
+ }
+ 
+ bool
+Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format_parse.cpython-314.pyc and new/src/gallium/auxiliary/util/__pycache__/u_format_parse.cpython-314.pyc differ
+--- a/src/proxy/proxy_context.c
++++ b/src/proxy/proxy_context.c
+@@ -3,6 +3,7 @@
+  * SPDX-License-Identifier: MIT
+  */
+ 
++#include "virgl_shm.h"
+ #include "proxy_context.h"
+ 
+ #include <fcntl.h>
+@@ -310,8 +311,9 @@
+    }
+ #endif
+ 
+-   const uint64_t size = lseek(fd, 0, SEEK_END);
+-   if (size != expected_size) {
++   /* (rounded up to pages where shared memory is an area) */
++   const uint64_t size = virgl_shm_size(fd);
++   if (size < expected_size || size - expected_size >= 4096) {
+       proxy_log("failed to validate shm size(%" PRIu64 ") expected(%" PRIu64 ")", size,
+                 expected_size);
+       return false;
+@@ -521,7 +523,7 @@
+    }
+ 
+    if (ctx->shmem.ptr)
+-      munmap(ctx->shmem.ptr, ctx->shmem.size);
++      virgl_shm_unmap(ctx->shmem.ptr, ctx->shmem.size);
+    if (ctx->shmem.fd >= 0)
+       close(ctx->shmem.fd);
+ 
+@@ -613,27 +615,19 @@
+ static int
+ alloc_memfd(const char *name, size_t size, void **out_ptr)
+ {
+-   int fd = os_create_anonymous_file(size, name);
++   void *ptr = NULL;
++   int fd = virgl_shm_create(size, name, &ptr);
+    if (fd < 0)
+       return -1;
+ 
+-   int ret = add_required_seals_to_fd(fd);
+-   if (ret)
+-      goto fail;
+-
+-   if (!out_ptr)
+-      return fd;
+-
+-   void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+-   if (ptr == MAP_FAILED)
+-      goto fail;
++   if (add_required_seals_to_fd(fd)) {
++      virgl_shm_unmap(ptr, size);
++      close(fd);
++      return -1;
++   }
+ 
+    *out_ptr = ptr;
+    return fd;
+-
+-fail:
+-   close(fd);
+-   return -1;
+ }
+ 
+ static bool
+--- a/src/venus/vkr_context.c
++++ b/src/venus/vkr_context.c
+@@ -3,6 +3,7 @@
+  * SPDX-License-Identifier: MIT
+  */
+ 
++#include "virgl_shm.h"
+ #include "vkr_context.h"
+ 
+ #include <sys/mman.h>
+@@ -188,7 +189,7 @@
+ {
+    struct vkr_resource *res = entry->data;
+    if (res->fd_type == VIRGL_RESOURCE_FD_SHM)
+-      munmap(res->u.data, res->size);
++      virgl_shm_unmap(res->u.data, res->size);
+    else if (res->u.fd >= 0)
+       close(res->u.fd);
+    free(res);
+@@ -259,13 +260,13 @@
+ {
+    assert(!vkr_context_get_resource(ctx, res_id));
+ 
+-   void *mmap_ptr = mmap(NULL, blob_size, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0);
++   void *mmap_ptr = virgl_shm_map(fd, blob_size);
+    if (mmap_ptr == MAP_FAILED)
+       return false;
+ 
+    if (!vkr_context_import_resource_internal(ctx, res_id, blob_size,
+                                              VIRGL_RESOURCE_FD_SHM, -1, mmap_ptr)) {
+-      munmap(mmap_ptr, blob_size);
++      virgl_shm_unmap(mmap_ptr, blob_size);
+       return false;
+    }
+ 
+@@ -280,19 +281,14 @@
+ {
+    assert(!vkr_context_get_resource(ctx, res_id));
+ 
+-   int fd = os_create_anonymous_file(blob_size, "vkr-shmem");
++   void *mmap_ptr = NULL;
++   int fd = virgl_shm_create(blob_size, "vkr-shmem", &mmap_ptr);
+    if (fd < 0)
+       return false;
+ 
+-   void *mmap_ptr = mmap(NULL, blob_size, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0);
+-   if (mmap_ptr == MAP_FAILED) {
+-      close(fd);
+-      return false;
+-   }
+-
+    if (!vkr_context_import_resource_internal(ctx, res_id, blob_size,
+                                              VIRGL_RESOURCE_FD_SHM, -1, mmap_ptr)) {
+-      munmap(mmap_ptr, blob_size);
++      virgl_shm_unmap(mmap_ptr, blob_size);
+       close(fd);
+       return false;
+    }
+--- a/src/venus/vkr_device.c
++++ b/src/venus/vkr_device.c
+@@ -133,6 +133,7 @@
+    ext_count += physical_dev->KHR_external_memory_fd;
+    ext_count += physical_dev->EXT_external_memory_dma_buf;
+    ext_count += physical_dev->KHR_external_fence_fd;
++   ext_count += physical_dev->host_pointer_import;
+    if (ext_count > args->pCreateInfo->enabledExtensionCount) {
+       exts = malloc(sizeof(*exts) * ext_count);
+       if (!exts) {
+@@ -149,6 +150,8 @@
+          exts[ext_count++] = "VK_EXT_external_memory_dma_buf";
+       if (physical_dev->KHR_external_fence_fd)
+          exts[ext_count++] = "VK_KHR_external_fence_fd";
++      if (physical_dev->host_pointer_import)
++         exts[ext_count++] = "VK_EXT_external_memory_host";
+ 
+       ((VkDeviceCreateInfo *)args->pCreateInfo)->ppEnabledExtensionNames = exts;
+       ((VkDeviceCreateInfo *)args->pCreateInfo)->enabledExtensionCount = ext_count;
+--- a/src/venus/vkr_device_memory.c
++++ b/src/venus/vkr_device_memory.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include "vkr_device_memory.h"
++#include "virgl_shm.h"
+ 
+ #include "venus-protocol/vn_protocol_renderer_transport.h"
+ 
+@@ -280,8 +281,42 @@
+    uint32_t valid_fd_types = 0;
+    int udmabuf_fd = -1;
+    void *gbm_bo = NULL;
++   int shm_fd = -1;
++   void *shm_ptr = NULL;
++   uint64_t shm_size = 0;
++   VkImportMemoryHostPointerInfoEXT local_host_info;
+    VkExportMemoryAllocateInfo local_export_info;
+-   if ((property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !res_info) {
++   if ((property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !res_info &&
++       physical_dev->host_pointer_import) {
++      /* The driver cannot export what it allocates: allocate shared memory
++       * and have it import that. (An application's own export request
++       * cannot be met then; none is passed on.)
++       */
++      const uint64_t align = physical_dev->host_pointer_alignment;
++      shm_size = (alloc_info->allocationSize + align - 1) / align * align;
++      shm_fd = virgl_shm_create(shm_size, "vkr-mem", &shm_ptr);
++      if (shm_fd < 0) {
++         args->ret = VK_ERROR_OUT_OF_HOST_MEMORY;
++         return;
++      }
++
++      if (export_info) {
++         VkBaseInStructure *prev_of_export_info = vkr_find_prev_struct(
++            alloc_info, VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO);
++         prev_of_export_info->pNext = export_info->pNext;
++         export_info = NULL;
++      }
++
++      local_host_info = (const VkImportMemoryHostPointerInfoEXT){
++         .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
++         .pNext = alloc_info->pNext,
++         .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
++         .pHostPointer = shm_ptr,
++      };
++      alloc_info->pNext = &local_host_info;
++      alloc_info->allocationSize = shm_size;
++      valid_fd_types = 1 << VIRGL_RESOURCE_FD_SHM;
++   } else if ((property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !res_info) {
+       /* An implementation can support dma_buf import along with opaque fd export/import.
+        * If the client driver is using external memory and requesting dma_buf, without
+        * dma_buf fd export support, we must use gbm bo import path instead of forcing
+@@ -373,6 +408,10 @@
+          close(local_import_info.fd);
+       if (gbm_bo)
+          vkr_gbm_bo_destroy(gbm_bo);
++      if (shm_fd >= 0) {
++         virgl_shm_unmap(shm_ptr, shm_size);
++         close(shm_fd);
++      }
+       return;
+    }
+ 
+@@ -381,6 +420,9 @@
+    mem->property_flags = property_flags;
+    mem->valid_fd_types = valid_fd_types;
+    mem->udmabuf_fd = udmabuf_fd;
++   mem->shm_fd = shm_fd;
++   mem->shm_ptr = shm_ptr;
++   mem->shm_size = shm_size;
+    mem->gbm_bo = gbm_bo;
+    mem->allocation_size = alloc_info->allocationSize;
+    mem->memory_type_index = mem_type_index;
+@@ -395,8 +437,16 @@
+    if (!mem)
+       return;
+ 
++   /* host memory the driver imported goes after the driver let go of it */
++   void *shm_ptr = mem->shm_ptr;
++   const uint64_t shm_size = mem->shm_size;
++   mem->shm_ptr = NULL;
++
+    vkr_device_memory_release(mem);
+    vkr_device_memory_destroy_and_remove(dispatch->data, args);
++
++   if (shm_ptr)
++      virgl_shm_unmap(shm_ptr, shm_size);
+ }
+ 
+ static void
+@@ -494,6 +544,10 @@
+       vkr_gbm_bo_destroy(mem->gbm_bo);
+    if (mem->udmabuf_fd >= 0)
+       close(mem->udmabuf_fd);
++   if (mem->shm_fd >= 0)
++      close(mem->shm_fd);
++   if (mem->shm_ptr)
++      virgl_shm_unmap(mem->shm_ptr, mem->shm_size);
+ }
+ 
+ bool
+@@ -527,6 +581,25 @@
+                                       : VIRGL_RENDERER_MAP_CACHE_WC;
+    }
+ 
++   if (mem->valid_fd_types & (1 << VIRGL_RESOURCE_FD_SHM)) {
++      /* our own shared memory: the same descriptor again */
++      const int shm_fd = os_dupfd_cloexec(mem->shm_fd);
++      if (shm_fd < 0 || mem->shm_size < blob_size) {
++         vkr_log("mem shm export failed");
++         if (shm_fd >= 0)
++            close(shm_fd);
++         return false;
++      }
++
++      mem->exported = true;
++      *out_blob = (struct virgl_context_blob){
++         .type = VIRGL_RESOURCE_FD_SHM,
++         .u.fd = shm_fd,
++         .map_info = map_info,
++      };
++      return true;
++   }
++
+    const bool can_export_dma_buf = mem->valid_fd_types & (1 << VIRGL_RESOURCE_FD_DMABUF);
+    const bool can_export_opaque = mem->valid_fd_types & (1 << VIRGL_RESOURCE_FD_OPAQUE);
+    enum virgl_resource_fd_type fd_type;
+--- a/src/venus/vkr_device_memory.h
++++ b/src/venus/vkr_device_memory.h
+@@ -26,6 +26,13 @@
+    /* udmabuf backing non-external mappable memory */
+    int udmabuf_fd;
+ 
++   /* shared memory of ours (virgl_shm.h) backing mappable memory, imported
++    * as a host pointer
++    */
++   int shm_fd;
++   void *shm_ptr;
++   uint64_t shm_size;
++
+    uint64_t allocation_size;
+    uint32_t memory_type_index;
+ 
+--- a/src/venus/vkr_physical_device.c
++++ b/src/venus/vkr_physical_device.c
+@@ -227,8 +227,45 @@
+           VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT);
+    }
+ 
++   physical_dev->host_pointer_import = false;
++#ifdef __HAIKU__
++   /* air/OS: no driver exports memory as a file descriptor another process
++    * could map (there are no dma-bufs; NVK on NVIDIA's resource manager
++    * says it can and cannot), but they import host memory. Host visible
++    * memory is then shared memory of ours (virgl_shm.h), imported: only
++    * memory types that are not device local can be that, so the others are
++    * not host visible to the guest.
++    */
++   if (physical_dev->EXT_external_memory_host) {
++      VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_props = {
++         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT,
++      };
++      VkPhysicalDeviceProperties2 props2 = {
++         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
++         .pNext = &host_props,
++      };
++      vk->GetPhysicalDeviceProperties2(handle, &props2);
++
++      physical_dev->host_pointer_import = true;
++      physical_dev->host_pointer_alignment =
++         MAX2(host_props.minImportedHostPointerAlignment, 4096);
++      physical_dev->is_dma_buf_fd_export_supported = false;
++      physical_dev->is_opaque_fd_export_supported = false;
++
++      VkPhysicalDeviceMemoryProperties *mem_props = &physical_dev->memory_properties;
++      for (uint32_t i = 0; i < mem_props->memoryTypeCount; i++) {
++         if (mem_props->memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
++            mem_props->memoryTypes[i].propertyFlags &=
++               ~(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
++                 VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
++         }
++      }
++   }
++#endif
++
+    /* fallback to gbm allocation with dma-buf import */
+-   if (!physical_dev->is_dma_buf_fd_export_supported &&
++   if (!physical_dev->host_pointer_import &&
++       !physical_dev->is_dma_buf_fd_export_supported &&
+        !physical_dev->is_opaque_fd_export_supported &&
+        physical_dev->EXT_external_memory_dma_buf)
+       physical_dev->gbm_device = vkr_physical_device_get_gbm_device();
+@@ -273,6 +310,8 @@
+          physical_dev->KHR_external_memory_fd = true;
+       else if (!strcmp(props->extensionName, "VK_EXT_external_memory_dma_buf"))
+          physical_dev->EXT_external_memory_dma_buf = true;
++      else if (!strcmp(props->extensionName, "VK_EXT_external_memory_host"))
++         physical_dev->EXT_external_memory_host = true;
+       else if (!strcmp(props->extensionName, "VK_KHR_external_fence_fd"))
+          physical_dev->KHR_external_fence_fd = true;
+ 
+--- a/src/venus/vkr_physical_device.h
++++ b/src/venus/vkr_physical_device.h
+@@ -23,6 +23,7 @@
+ 
+    bool KHR_external_memory_fd;
+    bool EXT_external_memory_dma_buf;
++   bool EXT_external_memory_host;
+ 
+    bool KHR_external_fence_fd;
+    bool KHR_external_semaphore_fd;
+@@ -34,6 +35,13 @@
+    void *gbm_device;
+    int udmabuf_dev_fd;
+ 
++   /* Host visible memory is shared memory of ours that the driver imports
++    * (VK_EXT_external_memory_host), where it cannot export memory as file
++    * descriptors (air/OS).
++    */
++   bool host_pointer_import;
++   uint64_t host_pointer_alignment;
++
+    VkQueueFamilyProperties *queue_family_properties;
+    uint32_t queue_family_property_count;
+ 
+--- a/src/virglrenderer.c
++++ b/src/virglrenderer.c
+@@ -50,6 +50,7 @@
+ #include "util/libsync.h"
+ #endif
+ 
++#include "virgl_shm.h"
+ #include "virglrenderer.h"
+ #include "virtgpu_drm.h"
+ 
+@@ -1248,7 +1249,7 @@
+       switch (export_fd_type) {
+       case VIRGL_RESOURCE_FD_DMABUF:
+       case VIRGL_RESOURCE_FD_SHM:
+-         map = mmap(NULL, res->map_size, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0);
++         map = virgl_shm_map(fd, res->map_size);
+          map_size = res->map_size;
+          break;
+       case VIRGL_RESOURCE_FD_OPAQUE:
+@@ -1290,7 +1291,7 @@
+       case VIRGL_RESOURCE_FD_DMABUF:
+       case VIRGL_RESOURCE_FD_SHM:
+       case VIRGL_RESOURCE_OPAQUE_HANDLE:
+-         ret = munmap(res->mapped, res->map_size);
++         ret = virgl_shm_unmap(res->mapped, res->map_size);
+          break;
+       case VIRGL_RESOURCE_FD_OPAQUE:
+          ret = vkr_allocator_resource_unmap(res);
+--- a/src/virgl_shm.h
++++ b/src/virgl_shm.h
+@@ -0,0 +1,170 @@
++/*
++ * Copyright 2026 the airDroid project
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef VIRGL_SHM_H
++#define VIRGL_SHM_H
++
++/* Memory shared between the renderer's processes and the VMM, named by a
++ * file descriptor that is passed around.
++ *
++ * Elsewhere that is an anonymous file and mmap(). On Haiku (air/OS) shared
++ * memory files live on the boot volume (their pages get written to disk)
++ * and a guest can only be given memory that is locked (NVMM's
++ * nvmm_hva_map_existing()). So there the memory is a fully locked, cloneable
++ * area, and the descriptor is a small unlinked file that names it; mapping
++ * clones the area.
++ */
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include "util/anon_file.h"
++
++#ifdef __HAIKU__
++
++#include <OS.h>
++
++#define VIRGL_SHM_MAGIC UINT64_C(0x6d68734c47525641) /* "AVRGLshm" */
++
++struct virgl_shm_file {
++   uint64_t magic;
++   int64_t area;
++   uint64_t size;
++};
++
++/* Makes shared memory of size bytes (rounded up to pages), mapped at
++ * *out_ptr; the descriptor, or -1.
++ */
++static inline int
++virgl_shm_create(size_t size, const char *name, void **out_ptr)
++{
++   const size_t rounded = (size + B_PAGE_SIZE - 1) & ~(size_t)(B_PAGE_SIZE - 1);
++   void *addr = NULL;
++   const area_id area = create_area(name, &addr, B_ANY_ADDRESS, rounded, B_FULL_LOCK,
++                                    B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA);
++   if (area < 0) {
++      errno = ENOMEM;
++      return -1;
++   }
++
++   char path[] = "/tmp/virgl-shm-XXXXXX";
++   const int fd = mkstemp(path);
++   if (fd < 0) {
++      delete_area(area);
++      return -1;
++   }
++   unlink(path);
++   fcntl(fd, F_SETFD, FD_CLOEXEC);
++
++   const struct virgl_shm_file file = {
++      .magic = VIRGL_SHM_MAGIC,
++      .area = area,
++      .size = rounded,
++   };
++   if (write(fd, &file, sizeof(file)) != (ssize_t)sizeof(file)) {
++      close(fd);
++      delete_area(area);
++      return -1;
++   }
++
++   *out_ptr = addr;
++   return fd;
++}
++
++/* Maps what fd names (size bytes of it), for reading and writing;
++ * MAP_FAILED if that fails. A descriptor that is not one of ours is mapped
++ * as a file.
++ */
++static inline void *
++virgl_shm_map(int fd, size_t size)
++{
++   struct virgl_shm_file file;
++   if (pread(fd, &file, sizeof(file), 0) != (ssize_t)sizeof(file) ||
++       file.magic != VIRGL_SHM_MAGIC)
++      return mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++
++   if (size > file.size) {
++      errno = EINVAL;
++      return MAP_FAILED;
++   }
++
++   /* a clone of a fully locked area is fully locked too */
++   void *addr = NULL;
++   const area_id clone = clone_area("virgl shm", &addr, B_ANY_ADDRESS,
++                                    B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA,
++                                    (area_id)file.area);
++   if (clone < 0) {
++      errno = ENOMEM;
++      return MAP_FAILED;
++   }
++   return addr;
++}
++
++/* How much memory fd names (a multiple of the page size here). */
++static inline uint64_t
++virgl_shm_size(int fd)
++{
++   struct virgl_shm_file file;
++   if (pread(fd, &file, sizeof(file), 0) == (ssize_t)sizeof(file) &&
++       file.magic == VIRGL_SHM_MAGIC)
++      return file.size;
++   return lseek(fd, 0, SEEK_END);
++}
++
++/* Unmaps what virgl_shm_create() or virgl_shm_map() mapped at ptr. */
++static inline int
++virgl_shm_unmap(void *ptr, size_t size)
++{
++   const area_id area = area_for(ptr);
++   area_info info;
++   if (area >= 0 && get_area_info(area, &info) == B_OK && info.address == ptr)
++      return delete_area(area) == B_OK ? 0 : -1;
++   return munmap(ptr, size);
++}
++
++#else /* !__HAIKU__ */
++
++static inline int
++virgl_shm_create(size_t size, const char *name, void **out_ptr)
++{
++   const int fd = os_create_anonymous_file(size, name);
++   if (fd < 0)
++      return -1;
++
++   void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++   if (ptr == MAP_FAILED) {
++      close(fd);
++      return -1;
++   }
++
++   *out_ptr = ptr;
++   return fd;
++}
++
++static inline void *
++virgl_shm_map(int fd, size_t size)
++{
++   return mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++}
++
++static inline uint64_t
++virgl_shm_size(int fd)
++{
++   return lseek(fd, 0, SEEK_END);
++}
++
++static inline int
++virgl_shm_unmap(void *ptr, size_t size)
++{
++   return munmap(ptr, size);
++}
++
++#endif /* !__HAIKU__ */
++
++#endif /* VIRGL_SHM_H */

@@ -445,6 +445,8 @@ impl Engine {
         let (gpu, env) = match (self.settings.gpu.as_str(), gl) {
             ("none", _) | (_, None) => ("none".to_string(), Vec::new()),
             ("virgl", Some((env, _))) => ("virgl".to_string(), env),
+            // experimental, only from settings.json: Vulkan through Venus
+            ("venus", Some((env, _))) => ("venus".to_string(), env),
             (_, Some((env, true))) => ("virgl".to_string(), env),
             (_, Some(_)) => ("none".to_string(), Vec::new()), // llvmpipe only: SwiftShader is faster
         };

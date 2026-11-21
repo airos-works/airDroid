@@ -105,13 +105,13 @@ impl VmConfig {
         socket_dir(&self.state_dir).join("airdroid.sock")
     }
     /// QEMU's socket for reading GPU frames straight into the app's window
-    /// bitmaps (qemu/patches/0103): on air/OS with gpu=virgl and
+    /// bitmaps (qemu/patches/0103): on air/OS with a GPU (virgl, venus) and
     /// `host_present`, unless AIRDROID_PRESENT=guest (the guest copies
     /// frames into its RAM first).
     pub fn present_socket(&self) -> Option<PathBuf> {
         let on = cfg!(target_os = "haiku")
             && self.host_present
-            && self.gpu == "virgl"
+            && (self.gpu == "virgl" || self.gpu == "venus")
             && std::env::var("AIRDROID_PRESENT").map_or(true, |v| v != "guest");
         on.then(|| socket_dir(&self.state_dir).join("present.sock"))
     }
@@ -213,6 +213,28 @@ impl VmConfig {
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
+        // Venus runs in virglrenderer's render server, next to QEMU
+        let mut qemu_end = None;
+        if self.gpu == "venus" {
+            if let Some(dir) = self.qemu.parent() {
+                let server = dir.join("virgl_render_server");
+                if cfg!(target_os = "haiku") {
+                    // We start it and give QEMU its socket: QEMU has a GPU
+                    // device by the time virglrenderer would fork it, and
+                    // such a fork takes an air/OS machine with an NVIDIA
+                    // GPU down.
+                    match spawn_render_server(&server, &log) {
+                        Ok(fd) => {
+                            cmd.env("AIRDROID_RENDER_SERVER_FD", fd.to_string());
+                            qemu_end = Some(fd);
+                        }
+                        Err(e) => eprintln!("airDroid: {}: {e}", server.display()),
+                    }
+                } else {
+                    cmd.env("RENDER_SERVER_EXEC_PATH", server);
+                }
+            }
+        }
         if let Some(s) = self.present_socket() {
             let _ = std::fs::remove_file(&s);
             cmd.env("AIRDROID_PRESENT_SOCKET", s);
@@ -222,9 +244,52 @@ impl VmConfig {
             cmd.env("QEMU_NVMM_MAP_FILE", map);
         }
         cmd.args(self.args()).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
-        let child = cmd.spawn()?;
+        let child = cmd.spawn();
+        if let Some(fd) = qemu_end {
+            // QEMU has it now (or did not start: the server then exits)
+            unsafe { libc::close(fd) };
+        }
+        let child = child?;
         let _ = std::fs::write(self.state_dir.join("qemu.pid"), format!("{}\n", child.id()));
         Ok(child)
+    }
+}
+
+/// Starts virglrenderer's render server on one end of a socket pair
+/// (SOCK_SEQPACKET, what its protocol needs) and returns the other end, which
+/// the next child (QEMU) inherits. The server exits when that end closes.
+fn spawn_render_server(server: &Path, log: &std::fs::File) -> std::io::Result<i32> {
+    let mut fds = [0i32; 2];
+    if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET, 0, fds.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let (ours, theirs) = (fds[0], fds[1]);
+    let cloexec = |fd: i32, on: bool| unsafe {
+        libc::fcntl(fd, libc::F_SETFD, if on { libc::FD_CLOEXEC } else { 0 });
+    };
+    // the server gets only its end
+    cloexec(ours, true);
+    let spawned = Command::new(server)
+        .arg("--socket-fd")
+        .arg(theirs.to_string())
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log.try_clone()?)
+        .spawn();
+    unsafe { libc::close(theirs) };
+    match spawned {
+        Ok(mut child) => {
+            // nobody else waits for it
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            cloexec(ours, false);
+            Ok(ours)
+        }
+        Err(e) => {
+            unsafe { libc::close(ours) };
+            Err(e)
+        }
     }
 }
 

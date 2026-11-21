@@ -24,6 +24,14 @@ if [[ $ARCH == x86_64 && ! -f $sys/develop/lib/pkgconfig/pixman-1.pc && ! -f $sy
 		ln -sfn ../../boot/system "$deps$p"
 	done < <(grep -ho "/packages/[^/]*/.self" "$sys"/develop/lib/pkgconfig/*.pc | sort -u)
 fi
+# Venus (Vulkan): the loader and headers virglrenderer's vkr builds against
+if [[ $ARCH == x86_64 && ! -f $sys/develop/lib/pkgconfig/vulkan.pc ]]; then
+	AIROS_CACHE=${AIROS_CACHE:-/data2/airos/cache} AIROS_SDK=${AIROS_SDK:-/data1/airos/sdk} \
+		python3 "${AIROS_CI:-/mnt/HaikuWork/src/airos-ci}/deps/haikuports.py" stage --no-deps "$ARCH" "$sys" \
+		vulkan_loader vulkan_loader_devel vulkan_headers >/dev/null
+fi
+VENUS=false
+[[ ! -f $sys/develop/lib/pkgconfig/vulkan.pc ]] || VENUS=true
 export PATH=$bin:$PATH
 W=$BUILD/gpu
 mkdir -p "$W"
@@ -68,8 +76,15 @@ if [[ ! -f $v/.patched ]]; then
 	done
 	touch "$v/.patched"
 fi
+# Venus runs in virglrenderer's render server (thread workers: no
+# signalfd/clone on air/OS), which QEMU starts (RENDER_SERVER_EXEC_PATH)
 [[ -f $v/build/build.ninja ]] || meson setup "$v/build" "$v" "${meson_args[@]}" -Dplatforms=egl -Dminigbm_allocation=false \
-	-Dvenus=false -Dtests=false -Dfuzzer=false -Dvalgrind=false -Dtracing=none -Dcheck-gl-errors=false > "$W/virgl-setup.log"
+	-Dvenus=$VENUS -Drender-server-worker=thread -Dtests=false -Dfuzzer=false -Dvalgrind=false -Dtracing=none -Dcheck-gl-errors=false > "$W/virgl-setup.log"
 ninja -C "$v/build" > "$W/virgl-build.log"
 DESTDIR=$deps meson install -C "$v/build" --no-rebuild > /dev/null
+rm -f "$Q/virgl_render_server"
+if [[ -f $v/build/server/virgl_render_server ]]; then
+	"${CROSS}strip" -o "$Q/virgl_render_server" "$v/build/server/virgl_render_server"
+	patchelf --force-rpath --set-rpath '$ORIGIN/lib' "$Q/virgl_render_server"
+fi
 ls -la "$sys"/lib/libvirglrenderer.so* "$sys"/lib/libepoxy.so*
