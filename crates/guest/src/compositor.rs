@@ -118,11 +118,23 @@ struct SrcRect {
     h: f64,
 }
 
+/// Damage that covers a surface whatever its size.
+const WHOLE_SURFACE: Rect = Rect::new(0, 0, 1 << 24, 1 << 24);
+
+fn union_damage(a: Option<Rect>, b: Option<Rect>) -> Option<Rect> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.union(&b)),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+
 #[derive(Default)]
 struct SurfState {
     /// Some(None) = detach, Some(Some(b)) = attach, None = unchanged.
     buffer: Option<Option<wl_buffer::WlBuffer>>,
-    damage: bool,
+    /// bounds of the damage requests (surface coordinates); None: none made
+    damage: Option<Rect>,
     callbacks: Vec<wl_callback::WlCallback>,
     feedbacks: Vec<wp_presentation_feedback::WpPresentationFeedback>,
     src: Option<Option<SrcRect>>,
@@ -138,7 +150,7 @@ impl SurfState {
         if n.buffer.is_some() {
             self.buffer = n.buffer;
         }
-        self.damage |= n.damage;
+        self.damage = union_damage(self.damage, n.damage);
         self.callbacks.extend(n.callbacks);
         self.feedbacks.extend(n.feedbacks);
         if n.src.is_some() {
@@ -169,6 +181,9 @@ enum Role {
 
 struct Surface {
     res: wl_surface::WlSurface,
+    /// what its commits damaged since the window's last frame went to the
+    /// host (surface coordinates); None: nothing
+    frame_damage: Option<Rect>,
     pending: SurfState,
     cached: Option<SurfState>,
     buffer: Option<wl_buffer::WlBuffer>,
@@ -390,6 +405,30 @@ impl State {
     fn apply(&mut self, id: &ObjectId, st: SurfState) {
         let window = self.root_window(id.clone());
         let Some(s) = self.surfaces.get_mut(id) else { return };
+        // what this commit changed, for the window's next frame
+        let mut damage = st.damage;
+        if let Some(Some(nb)) = &st.buffer {
+            let new = self.buffers.get(&nb.id()).map(|i| (i.host_id, i.gpu.is_some()));
+            let old = s.buffer.as_ref().and_then(|b| self.buffers.get(&b.id())).map(|i| i.host_id);
+            let everything = damage.is_some_and(|d| d.w >= WHOLE_SURFACE.w && d.h >= WHOLE_SURFACE.h);
+            match (new, damage) {
+                // another buffer and no word about damage: all of it
+                (Some((host_id, _)), None) if Some(host_id) != old => damage = Some(WHOLE_SURFACE),
+                // The buffer it shows already, "all damaged": Android's
+                // composer says that of a layer it has no damage for, also
+                // when it commits the same frame again (SurfaceFlinger's
+                // own composition target, every vsync). A buffer on screen
+                // is not drawn into: nothing changed.
+                (Some((host_id, _)), Some(_)) if Some(host_id) == old && everything => damage = None,
+                // a part of the buffer it shows: a client that does draw
+                // into its front buffer
+                (Some((host_id, true)), Some(d)) if Some(host_id) == old && !d.is_empty() => {
+                    self.link.send(&ToHost::BufferDirty { id: host_id });
+                }
+                _ => {}
+            }
+        }
+        s.frame_damage = union_damage(s.frame_damage, damage);
         if let Some(b) = st.buffer {
             if let Some(nb) = b.as_ref() {
                 if self.buffers.get(&nb.id()).is_some_and(|i| i.gpu.is_some()) {
@@ -660,13 +699,26 @@ impl State {
             let serial = w.serial;
             let release = std::mem::take(&mut w.pending_release);
             w.in_flight = Some(InFlight { serial, sent_ns: now, callbacks, feedbacks, release });
+            // What the commits since the window's last frame damaged, a
+            // rectangle for each layer (empty: nothing). A surface's
+            // damage is in its own coordinates: where it is scaled or
+            // cropped, all of it.
+            let mut damage = Vec::with_capacity(layers.len());
+            for (l, sid) in &layers {
+                let d = match self.surfaces.get_mut(sid).and_then(|s| s.frame_damage.take()) {
+                    Some(d) if l.src.x == 0 && l.src.y == 0 && l.src.w == l.dst.w && l.src.h == l.dst.h => d.intersect(&Rect::new(0, 0, l.dst.w, l.dst.h)),
+                    Some(d) if !d.is_empty() => Rect::new(0, 0, l.dst.w, l.dst.h),
+                    _ => Rect::new(0, 0, 0, 0),
+                };
+                damage.push(if d.is_empty() { Rect::new(0, 0, 0, 0) } else { Rect::new(l.dst.x + d.x, l.dst.y + d.y, d.w, d.h) });
+            }
             let mut out_layers: Vec<Layer> = layers.into_iter().map(|(l, _)| l).collect();
             // 1x1 solid buffers: the host fills; encode the colour in src.x
             for (i, color) in solid {
                 out_layers[i].src = Rect::new(color as i32, 0, 0, 0);
                 out_layers[i].buffer = u32::MAX;
             }
-            self.link.send(&ToHost::Frame { window: wid, serial, width, height, layers: out_layers, damage: Vec::new() });
+            self.link.send(&ToHost::Frame { window: wid, serial, width, height, layers: out_layers, damage });
         }
     }
 
@@ -1124,6 +1176,7 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for State {
                 st.surfaces.insert(
                     oid.clone(),
                     Surface {
+                        frame_damage: None,
                         res: s,
                         pending: SurfState::default(),
                         cached: None,
@@ -1178,9 +1231,12 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
                     sf.pending.buffer = Some(buffer);
                 }
             }
-            wl_surface::Request::Damage { .. } | wl_surface::Request::DamageBuffer { .. } => {
+            // (buffer coordinates are surface coordinates where a frame's
+            // damage is used: unscaled surfaces)
+            wl_surface::Request::Damage { x, y, width, height } | wl_surface::Request::DamageBuffer { x, y, width, height } => {
                 if let Some(sf) = st.surfaces.get_mut(&oid) {
-                    sf.pending.damage = true;
+                    let r = Rect::new(x.clamp(0, 1 << 24), y.clamp(0, 1 << 24), width.clamp(0, 1 << 24), height.clamp(0, 1 << 24));
+                    sf.pending.damage = union_damage(sf.pending.damage, Some(r));
                 }
             }
             wl_surface::Request::Frame { callback } => {

@@ -24,6 +24,8 @@ pub struct Buffer {
     pub resource: u32,
 }
 unsafe impl Send for Buffer {}
+// (composing in bands only reads through the pointers)
+unsafe impl Sync for Buffer {}
 
 impl Buffer {
     pub fn new(mem: &GuestMem, width: u32, height: u32, stride: u32, format: u32, ranges: &[GpaRange]) -> Buffer {
@@ -142,11 +144,18 @@ pub struct Canvas {
     conv: Vec<u32>,
     /// the generic path only (tests compare the fast paths with it)
     slow: bool,
+    /// the window row `out` starts at (a band of a frame; else 0)
+    top: i32,
+    /// threads for one frame at most (0: as many as make sense)
+    pub bands: usize,
 }
+
+/// Areas smaller than this are composed by the calling thread alone.
+const BAND_PIXELS: i64 = 300_000;
 
 impl Canvas {
     pub fn new() -> Canvas {
-        Canvas { width: 0, height: 0, pixels: Vec::new(), row: Vec::new(), conv: Vec::new(), slow: false }
+        Canvas { width: 0, height: 0, pixels: Vec::new(), row: Vec::new(), conv: Vec::new(), slow: false, top: 0, bands: 0 }
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
@@ -185,10 +194,32 @@ impl Canvas {
         ox: i32,
         oy: i32,
     ) -> Rect {
+        self.compose_region(out, width, height, layers, buffers, ox, oy, None)
+    }
+
+    /// Like `compose_into`, for the part `clip` of `out` only (in `out`'s
+    /// coordinates; None: all of it): the rest of `out` keeps what it has.
+    /// Returns the area painted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compose_region(
+        &mut self,
+        out: &mut [u32],
+        width: u32,
+        height: u32,
+        layers: &[Layer],
+        buffers: &HashMap<u32, Buffer>,
+        ox: i32,
+        oy: i32,
+        clip: Option<Rect>,
+    ) -> Rect {
         assert!(out.len() >= width as usize * height as usize);
         self.width = width;
         self.height = height;
-        let full = Rect::new(0, 0, self.width as i32, self.height as i32);
+        let bounds = Rect::new(0, 0, self.width as i32, self.height as i32);
+        let full = clip.map_or(bounds, |c| c.intersect(&bounds));
+        if full.is_empty() {
+            return full;
+        }
         let shifted: Vec<Layer>;
         let layers = if ox != 0 || oy != 0 {
             shifted = layers
@@ -206,42 +237,62 @@ impl Canvas {
         };
         // layers under the topmost opaque one that covers everything are
         // hidden; without one, start from black
-        let covers = |l: &Layer| {
-            l.dst.x <= 0 && l.dst.y <= 0 && l.dst.x + l.dst.w >= full.w && l.dst.y + l.dst.h >= full.h && {
-                if l.buffer == u32::MAX {
-                    (l.src.x as u32) >> 24 == 0xff
+        let first = if self.slow { None } else { first_needed(layers, buffers, &full) };
+        let clear = first.is_none();
+        let layers = &layers[first.unwrap_or(0)..];
+        // A large area in bands, a thread each: blending several layers of
+        // a whole screen is 20 ms on one.
+        let wanted = match self.bands {
+            0 => std::thread::available_parallelism().map_or(1, |n| n.get()).min(8),
+            n => n,
+        };
+        let bands = wanted.min((full.w as i64 * full.h as i64 / BAND_PIXELS) as usize).min(full.h as usize);
+        if bands < 2 || self.slow {
+            self.top = 0;
+            self.paint(out, layers, buffers, &full, clear);
+            return full;
+        }
+        let w = width as usize;
+        let slow = self.slow;
+        let mut rest = &mut out[full.y as usize * w..(full.y + full.h) as usize * w];
+        let mut y = full.y;
+        std::thread::scope(|scope| {
+            for i in 0..bands {
+                let h = (full.y + full.h - y) / (bands - i) as i32;
+                let (band, tail) = std::mem::take(&mut rest).split_at_mut(h as usize * w);
+                rest = tail;
+                let clip = Rect::new(full.x, y, full.w, h);
+                let mut part = Canvas { width, height, top: y, slow, ..Canvas::new() };
+                let mut work = move || part.paint(band, layers, buffers, &clip, clear);
+                if i + 1 == bands {
+                    work();
                 } else {
-                    let b = buffers.get(&l.buffer);
-                    b.is_some_and(|b| {
-                        b.valid
-                            && (l.opaque || !format::has_alpha(b.format))
-                            && l.src.x >= 0 && l.src.y >= 0
-                            && l.src.x + l.src.w <= b.width as i32 && l.src.y + l.src.h <= b.height as i32
-                    })
+                    scope.spawn(work);
                 }
+                y += h;
             }
-        };
-        let first = if self.slow { None } else { layers.iter().rposition(|l| covers(l)) };
-        let layers = match first {
-            Some(i) => &layers[i..],
-            None => {
-                out[..width as usize * height as usize].fill(0xff00_0000);
-                layers
-            }
-        };
+        });
+        full
+    }
+
+    /// Paints `layers` into the part `clip` of the frame; `out` starts at
+    /// row `self.top` of it.
+    fn paint(&mut self, out: &mut [u32], layers: &[Layer], buffers: &HashMap<u32, Buffer>, clip: &Rect, clear: bool) {
+        if clear {
+            self.fill(out, *clip, 0xff00_0000);
+        }
         for l in layers {
             if l.buffer == u32::MAX {
                 // solid colour (src.x carries ARGB, premultiplied)
-                self.fill(out, l.dst.intersect(&full), l.src.x as u32);
+                self.fill(out, l.dst.intersect(clip), l.src.x as u32);
                 continue;
             }
             let Some(b) = buffers.get(&l.buffer) else { continue };
             if !b.valid {
                 continue;
             }
-            self.draw(out, l, b, &full);
+            self.draw(out, l, b, clip);
         }
-        full
     }
 
     fn fill(&mut self, out: &mut [u32], r: Rect, color: u32) {
@@ -250,7 +301,8 @@ impl Canvas {
         }
         let w = self.width as usize;
         for y in r.y..r.y + r.h {
-            let row = &mut out[y as usize * w + r.x as usize..y as usize * w + (r.x + r.w) as usize];
+            let at = (y - self.top) as usize * w;
+            let row = &mut out[at + r.x as usize..at + (r.x + r.w) as usize];
             if color >> 24 == 0xff {
                 row.fill(color);
             } else {
@@ -289,7 +341,7 @@ impl Canvas {
             let n = clip.w as usize;
             for y in clip.y..clip.y + clip.h {
                 let sy = (src.y + (y - l.dst.y)) as usize;
-                let start = y as usize * w + clip.x as usize;
+                let start = (y - self.top) as usize * w + clip.x as usize;
                 let dst_row = &mut out[start..start + n];
                 let bytes = unsafe { std::slice::from_raw_parts_mut(dst_row.as_mut_ptr() as *mut u8, n * 4) };
                 b.read(sy * b.stride as usize + x0 * 4, bytes);
@@ -321,7 +373,7 @@ impl Canvas {
                 let sy = (src.y + (y - l.dst.y)) as usize;
                 let bytes = unsafe { std::slice::from_raw_parts_mut(conv.as_mut_ptr() as *mut u8, n * 4) };
                 b.read(sy * b.stride as usize + x0 * 4, bytes);
-                let start = y as usize * w + clip.x as usize;
+                let start = (y - self.top) as usize * w + clip.x as usize;
                 let dst_row = &mut out[start..start + n];
                 let row = &conv[..n];
                 // rows that are opaque throughout (all of a window's but its
@@ -368,7 +420,7 @@ impl Canvas {
                 self.conv = conv;
                 last_sy = sy;
             }
-            let dst_row = &mut out[y as usize * w..(y as usize + 1) * w];
+            let dst_row = &mut out[(y - self.top) as usize * w..((y - self.top) as usize + 1) * w];
             for x in clip.x..clip.x + clip.w {
                 let si = if scaled {
                     ((x - l.dst.x) as usize * src.w as usize) / l.dst.w as usize
@@ -436,6 +488,114 @@ impl Buffer {
     }
 }
 
+/// Where two buffers of one layout differ within `area` (buffer
+/// coordinates, four-byte pixels): the bounds, or an empty rectangle if
+/// nowhere. None if they cannot be compared.
+///
+/// For a client that says "all of it changed" with every buffer: Android's
+/// SurfaceFlinger hands its own composition target over like that, one
+/// buffer after the other with the same picture.
+pub fn buffer_changes(a: &Buffer, b: &Buffer, area: &Rect) -> Option<Rect> {
+    let four = |f| matches!(f, format::ARGB8888 | format::XRGB8888 | format::ABGR8888 | format::XBGR8888);
+    if !a.valid || !b.valid || (a.width, a.height, a.stride, a.format) != (b.width, b.height, b.stride, b.format) || !four(a.format) {
+        return None;
+    }
+    let area = area.intersect(&Rect::new(0, 0, a.width as i32, a.height as i32));
+    if area.is_empty() {
+        return Some(Rect::new(0, 0, 0, 0));
+    }
+    let rows = |y0: i32, y1: i32| -> Option<(i32, i32, i32, i32)> {
+        let n = area.w as usize * 4;
+        let (mut ra, mut rb) = (vec![0u8; n], vec![0u8; n]);
+        let mut found: Option<(i32, i32, i32, i32)> = None; // x0, y0, x1, y1 (inclusive)
+        for y in y0..y1 {
+            let off = y as usize * a.stride as usize + area.x as usize * 4;
+            a.read(off, &mut ra);
+            b.read(off, &mut rb);
+            if ra == rb {
+                continue;
+            }
+            let first = ra.chunks_exact(4).zip(rb.chunks_exact(4)).position(|(p, q)| p != q).unwrap() as i32;
+            let last = ra.chunks_exact(4).zip(rb.chunks_exact(4)).rposition(|(p, q)| p != q).unwrap() as i32;
+            found = Some(match found {
+                None => (first, y, last, y),
+                Some((x0, top, x1, _)) => (x0.min(first), top, x1.max(last), y),
+            });
+        }
+        found
+    };
+    // in bands, like composing: 8 MB of a whole screen each
+    let bands = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8).min((area.w as i64 * area.h as i64 / BAND_PIXELS) as usize).max(1);
+    let rows = &rows;
+    let found: Vec<Option<(i32, i32, i32, i32)>> = std::thread::scope(|scope| {
+        let step = (area.h as usize).div_ceil(bands) as i32;
+        let handles: Vec<_> = (0..bands as i32)
+            .map(|i| {
+                let (y0, y1) = (area.y + i * step, (area.y + (i + 1) * step).min(area.y + area.h));
+                scope.spawn(move || if y0 < y1 { rows(y0, y1) } else { None })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap_or(None)).collect()
+    });
+    let mut all: Option<(i32, i32, i32, i32)> = None;
+    for f in found.into_iter().flatten() {
+        all = Some(match all {
+            None => f,
+            Some((x0, y0, x1, y1)) => (x0.min(f.0), y0.min(f.1), x1.max(f.2), y1.max(f.3)),
+        });
+    }
+    Some(match all {
+        None => Rect::new(0, 0, 0, 0),
+        Some((x0, y0, x1, y1)) => Rect::new(area.x + x0, y0, x1 - x0 + 1, y1 - y0 + 1),
+    })
+}
+
+/// The topmost layer that hides everything under it in `region` (opaque,
+/// covering it, all of its source inside its buffer): composing `region`
+/// starts there. None: start from black with the first layer.
+pub fn first_needed(layers: &[Layer], buffers: &HashMap<u32, Buffer>, region: &Rect) -> Option<usize> {
+    layers.iter().rposition(|l| {
+        l.dst.x <= region.x
+            && l.dst.y <= region.y
+            && l.dst.x + l.dst.w >= region.x + region.w
+            && l.dst.y + l.dst.h >= region.y + region.h
+            && if l.buffer == u32::MAX {
+                (l.src.x as u32) >> 24 == 0xff
+            } else {
+                buffers.get(&l.buffer).is_some_and(|b| {
+                    b.valid
+                        && (l.opaque || !format::has_alpha(b.format))
+                        && l.src.x >= 0
+                        && l.src.y >= 0
+                        && l.src.x + l.src.w <= b.width as i32
+                        && l.src.y + l.src.h <= b.height as i32
+                })
+            }
+    })
+}
+
+/// What a window's frame changed against the frame before it: the bounds of
+/// the layers that are not the same in both (their old and new places).
+/// None: everything (the layers were added, removed or reordered); an empty
+/// rectangle: nothing.
+///
+/// A layer with the same buffer in both frames shows the same pixels: a
+/// client cannot draw into the buffer a surface shows (Android's buffer
+/// queues never hand out the front buffer), so new content comes in another
+/// buffer.
+pub fn frame_changes(before: &[Layer], now: &[Layer]) -> Option<Rect> {
+    if before.len() != now.len() {
+        return None;
+    }
+    let mut changed = Rect::new(0, 0, 0, 0);
+    for (b, n) in before.iter().zip(now) {
+        if b != n {
+            changed = changed.union(&b.dst).union(&n.dst);
+        }
+    }
+    Some(changed)
+}
+
 /// Like `content_bounds`, without the translucent margins (shadows) of the
 /// layers: what a window without per-pixel transparency should show.
 pub fn opaque_bounds(layers: &[Layer], buffers: &HashMap<u32, Buffer>) -> Option<Rect> {
@@ -479,6 +639,114 @@ pub fn content_bounds(layers: &[Layer]) -> Option<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_region_composes_like_the_whole() {
+        let (w, h) = (64u32, 40u32);
+        let (app, bar, layers) = frame(w, h);
+        // a third layer in the middle, translucent
+        let mut dot = vec![0u8; 16 * 16 * 4];
+        for (i, b) in dot.iter_mut().enumerate() {
+            *b = if i % 4 == 3 { 0x60 } else { (i % 61) as u8 / 3 };
+        }
+        let mut layers = layers;
+        layers.push(Layer { buffer: 3, src: Rect::new(0, 0, 16, 16), dst: Rect::new(20, 12, 16, 16), opaque: false });
+        let buffers = HashMap::from([
+            (1, Buffer::from_slice(&app, w, h, w * 4, format::XRGB8888)),
+            (2, Buffer::from_slice(&bar, w, 48, w * 4, format::ARGB8888)),
+            (3, Buffer::from_slice(&dot, 16, 16, 64, format::ARGB8888)),
+        ]);
+        let mut whole = vec![0u32; (w * h) as usize];
+        Canvas::new().compose_into(&mut whole, w, h, &layers, &buffers, 0, 0);
+        for clip in [Rect::new(18, 10, 20, 20), Rect::new(0, 0, 64, 5), Rect::new(60, 30, 40, 40), Rect::new(5, 5, 1, 1)] {
+            let mut part = vec![0x1234_5678u32; (w * h) as usize];
+            let painted = Canvas::new().compose_region(&mut part, w, h, &layers, &buffers, 0, 0, Some(clip));
+            assert_eq!(painted, clip.intersect(&Rect::new(0, 0, w as i32, h as i32)));
+            for y in 0..h as i32 {
+                for x in 0..w as i32 {
+                    let i = (y as u32 * w + x as u32) as usize;
+                    let inside = x >= painted.x && x < painted.x + painted.w && y >= painted.y && y < painted.y + painted.h;
+                    assert_eq!(part[i], if inside { whole[i] } else { 0x1234_5678 }, "at {x},{y} for {clip:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bands_compose_like_one_thread() {
+        let (w, h) = (900u32, 700u32);
+        let (app, bar, mut layers) = frame(w, h);
+        let mut veil = vec![0u8; (w * h * 4) as usize];
+        for (i, b) in veil.iter_mut().enumerate() {
+            *b = if i % 4 == 3 { 0x40 } else { (i % 53) as u8 / 4 };
+        }
+        // a translucent layer over everything, scaled, and one that is not
+        layers.push(Layer { buffer: 3, src: Rect::new(0, 0, w as i32, h as i32), dst: Rect::new(0, 0, w as i32, h as i32), opaque: false });
+        layers.push(Layer { buffer: 3, src: Rect::new(0, 0, 300, 300), dst: Rect::new(100, 50, 450, 600), opaque: false });
+        let buffers = HashMap::from([
+            (1, Buffer::from_slice(&app, w, h, w * 4, format::XRGB8888)),
+            (2, Buffer::from_slice(&bar, w, 48, w * 4, format::ARGB8888)),
+            (3, Buffer::from_slice(&veil, w, h, w * 4, format::ABGR8888)),
+        ]);
+        let mut one = vec![0u32; (w * h) as usize];
+        let mut c = Canvas::new();
+        c.bands = 1;
+        c.compose_into(&mut one, w, h, &layers, &buffers, 0, 0);
+        for bands in [2, 3, 7] {
+            let mut many = vec![0x1111_1111u32; (w * h) as usize];
+            let mut c = Canvas::new();
+            c.bands = bands;
+            c.compose_into(&mut many, w, h, &layers, &buffers, 0, 0);
+            assert!(one == many, "{bands} bands differ from one thread");
+            // and a region of it
+            let clip = Rect::new(37, 91, 801, 577);
+            let mut part = vec![0x1111_1111u32; (w * h) as usize];
+            c.compose_region(&mut part, w, h, &layers, &buffers, 0, 0, Some(clip));
+            for y in 0..h as i32 {
+                for x in 0..w as i32 {
+                    let i = (y as u32 * w + x as u32) as usize;
+                    let inside = x >= clip.x && x < clip.x + clip.w && y >= clip.y && y < clip.y + clip.h;
+                    assert_eq!(part[i], if inside { one[i] } else { 0x1111_1111 }, "at {x},{y} with {bands} bands");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn buffer_changes_are_where_the_pixels_differ() {
+        let (w, h) = (1000u32, 700u32);
+        let one = vec![7u8; (w * h * 4) as usize];
+        let mut two = one.clone();
+        let a = Buffer::from_slice(&one, w, h, w * 4, format::ARGB8888);
+        let whole = Rect::new(0, 0, w as i32, h as i32);
+        assert_eq!(buffer_changes(&a, &Buffer::from_slice(&two, w, h, w * 4, format::ARGB8888), &whole), Some(Rect::new(0, 0, 0, 0)));
+        // two pixels, far apart (in different bands)
+        two[(30 * w as usize + 100) * 4 + 2] = 9;
+        two[(650 * w as usize + 900) * 4] = 9;
+        let b = Buffer::from_slice(&two, w, h, w * 4, format::ARGB8888);
+        assert_eq!(buffer_changes(&a, &b, &whole), Some(Rect::new(100, 30, 801, 621)));
+        // within an area that has only the first
+        assert_eq!(buffer_changes(&a, &b, &Rect::new(50, 10, 200, 100)), Some(Rect::new(100, 30, 1, 1)));
+        // and one that has neither
+        assert_eq!(buffer_changes(&a, &b, &Rect::new(200, 100, 300, 300)), Some(Rect::new(0, 0, 0, 0)));
+        // another layout: no answer
+        assert_eq!(buffer_changes(&a, &Buffer::from_slice(&two, w, h - 1, w * 4, format::ARGB8888), &whole), None);
+    }
+
+    #[test]
+    fn frame_changes_are_the_layers_that_differ() {
+        let l = |buffer, x, w| Layer { buffer, src: Rect::new(0, 0, w, 10), dst: Rect::new(x, 0, w, 10), opaque: true };
+        let before = vec![l(1, 0, 100), l(2, 10, 20), l(3, 50, 20)];
+        assert_eq!(frame_changes(&before, &before), Some(Rect::new(0, 0, 0, 0)));
+        // another buffer in the second layer
+        let now = vec![l(1, 0, 100), l(7, 10, 20), l(3, 50, 20)];
+        assert_eq!(frame_changes(&before, &now), Some(Rect::new(10, 0, 20, 10)));
+        // the third layer moved: where it was and where it is
+        let now = vec![l(1, 0, 100), l(2, 10, 20), l(3, 60, 20)];
+        assert_eq!(frame_changes(&before, &now), Some(Rect::new(50, 0, 30, 10)));
+        // a layer more: everything
+        assert_eq!(frame_changes(&before, &before[..2]), None);
+    }
 
     /// A typical Android frame: a full-screen opaque XRGB layer (the app)
     /// and a translucent ARGB status bar over it.

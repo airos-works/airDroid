@@ -157,6 +157,7 @@ fn main() {
                     }
                     host.lock().unwrap().buffers.insert(id, b);
                 }
+                ToHost::BufferDirty { .. } => {}
                 ToHost::BufferDestroy { id } => {
                     host.lock().unwrap().buffers.remove(&id);
                 }
