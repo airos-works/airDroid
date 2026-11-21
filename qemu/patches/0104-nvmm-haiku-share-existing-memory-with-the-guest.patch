@@ -28,7 +28,35 @@
  #include "system/runstate.h"
  #include "qemu/main-loop.h"
  #include "qemu/error-report.h"
-@@ -1083,6 +1085,42 @@
+@@ -1019,6 +1021,27 @@
+         return -err;
+     }
+ 
++#ifdef __HAIKU__
++    /*
++     * airDroid: a guest of air/OS's NVMM has 128 GiB of physical address
++     * space (NVMM_MAX_RAM), but would see the host's address width, and
++     * firmware and Linux put large 64-bit device windows (virtio-gpu's
++     * host memory window for blobs) near the top of what the processor
++     * says it has, where NVMM maps nothing. Say 37 bits.
++     */
++    memset(&cpuid, 0, sizeof(cpuid));
++    cpuid.mask = 1;
++    cpuid.leaf = 0x80000008;
++    cpuid.u.mask.del.eax = 0xff;
++    cpuid.u.mask.set.eax = 37;
++    ret = nvmm_vcpu_configure(mach, &qcpu->vcpu, NVMM_VCPU_CONF_CPUID,
++        &cpuid);
++    if (ret == -1) {
++        warn_report("NVMM: could not limit the guest's physical address "
++            "width, error=%d", errno);
++    }
++#endif
++
+     ret = nvmm_vcpu_configure(mach, &qcpu->vcpu, NVMM_VCPU_CONF_CALLBACKS,
+         &nvmm_callbacks);
+     if (ret == -1) {
+@@ -1083,6 +1106,42 @@
  
  /* -------------------------------------------------------------------------- */
  
@@ -71,7 +99,7 @@
  static void
  nvmm_update_mapping(hwaddr start_pa, ram_addr_t size, uintptr_t hva,
      bool add, bool rom, const char *name)
-@@ -1097,13 +1135,13 @@
+@@ -1097,13 +1156,13 @@
          }
          ret = nvmm_gpa_map(mach, hva, start_pa, size, prot);
  #ifdef __HAIKU__
@@ -87,7 +115,7 @@
              nvmm_haiku_log_mapping(start_pa, size, hva, false);
          }
  #endif
-@@ -1147,6 +1185,12 @@
+@@ -1147,6 +1206,12 @@
      hva = (uintptr_t)memory_region_get_ram_ptr(mr) +
          section->offset_within_region + delta;
  
@@ -100,7 +128,7 @@
      nvmm_update_mapping(start_pa, size, hva, add,
          memory_region_is_rom(mr), mr->name);
  }
-@@ -1199,6 +1243,74 @@
+@@ -1199,6 +1264,74 @@
      .priority = MEMORY_LISTENER_PRIORITY_ACCEL,
  };
  
@@ -175,7 +203,7 @@
  static void
  nvmm_ram_block_added(RAMBlockNotifier *n, void *host, size_t size,
                       size_t max_size)
-@@ -1207,6 +1319,11 @@
+@@ -1207,6 +1340,11 @@
      uintptr_t hva = (uintptr_t)host;
      int ret;
  
@@ -187,7 +215,7 @@
      ret = nvmm_hva_map(mach, hva, max_size);
  #ifdef __HAIKU__
      if (ret == 0) {
-@@ -1227,6 +1344,9 @@
+@@ -1227,6 +1365,9 @@
  }
  
  static struct RAMBlockNotifier nvmm_ram_notifier = {
