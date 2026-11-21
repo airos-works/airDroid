@@ -208,6 +208,7 @@ impl VmConfig {
         std::fs::create_dir_all(&self.state_dir)?;
         let _ = std::fs::remove_file(self.socket());
         let _ = std::fs::remove_file(self.console_log());
+        raise_fd_limit();
         let log = std::fs::File::create(self.qemu_log())?;
         let mut cmd = Command::new(&self.qemu);
         for (k, v) in &self.env {
@@ -252,6 +253,19 @@ impl VmConfig {
         let child = child?;
         let _ = std::fs::write(self.state_dir.join("qemu.pid"), format!("{}\n", child.id()));
         Ok(child)
+    }
+}
+
+/// QEMU and the render server (which inherit our limit) need more file
+/// descriptors than air/OS's 256 by default: one per GPU resource and blob,
+/// per Venus context a few, and the NVIDIA driver one per memory mapping.
+/// Without them Vulkan devices and blobs fail to be created once a few apps
+/// run.
+fn raise_fd_limit() {
+    let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } == 0 && lim.rlim_cur < lim.rlim_max {
+        lim.rlim_cur = lim.rlim_max;
+        unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lim) };
     }
 }
 
