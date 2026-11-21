@@ -117,9 +117,15 @@ Zink on NVK on NVIDIA's resource manager):
 | Scroll test (6 swipe pairs in Settings) | 305-332 frames, 0-0.3 % janky |
 | Frame time, median / 90th / 99th percentile | 5-6 / 7-9 / 9-18 ms |
 
-Waydroid's side on the same machine (a Linux live image; the GTX 1070
-has only nouveau there, which cannot raise the card's clocks): see
-below once measured.
+Waydroid's side on the same machine: not measured yet. The attempt
+(2026-11-21) was to boot a Linux live image from the lab KVM's virtual
+media; the KVM's USB link to the X399 is not connected (its gadget
+reads "not attached", the X399 lists no such USB device), so the image
+never reached the firmware. With that cable in, mount the rescue image
+as a CD and repeat the same three measurements under Waydroid. Expect
+the graphics numbers to say more about nouveau than about Waydroid:
+on Linux this GTX 1070 has only nouveau, which cannot raise the card's
+clocks; boot and app start are the fair part.
 
 ## Needs
 
