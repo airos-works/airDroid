@@ -125,19 +125,34 @@ virgl, not the host path.
 ## GPU plan
 
 1. Done: virgl (GL) through virglrenderer on EGL.
-2. Venus (Vulkan), experimental (`gpu: "venus"`, not offered in the
-   settings window): QEMU gets blob resources, a host memory window and
-   venus=on, Android `ro.hardware.vulkan=virtio` (Waydroid's vendor image
-   has Mesa's Venus driver). Tried on Linux/KVM with lavapipe (QEMU on
-   Xvfb, SDL GL): Android enumerates the Venus device and the host render
-   server starts, but rendering into gralloc buffers ends in "aborting on
-   ring fatal error": virglrenderer's Venus shares memory with GL through
-   GBM and dma-bufs, which a host without a render node lacks. On air/OS
-   it needs (a) that external memory path ported to air/OS's GPU stack
-   (virglrenderer there is built without GBM) and (b) NVMM mapping an
-   existing area into the guest (blob/hostmem): NVMM's hva_map always
-   replaces the range with new anonymous memory (as NetBSD's does). Both
-   need GPU hardware to develop.
+2. Venus (Vulkan), in progress (`gpu: "venus"`, not offered in the
+   settings window; Vulkan apps use lavapipe on the CPU meanwhile).
+   What it takes on air/OS, in layers:
+   1. Done (Haiku branch `nvmm-map-existing`, to be merged): NVMM maps
+      memory QEMU already has into the guest. `nvmm_hva_map()` always
+      replaces the range with new anonymous memory (as NetBSD's does);
+      `nvmm_hva_map_existing()` registers part of a fully locked area
+      instead, so memory shared with the render server can appear in
+      the guest's blob window. Test: `libnvmm_hva_existing`.
+   2. QEMU: blob resources and the host memory window on NVMM (RAM-ptr
+      regions through `nvmm_hva_map_existing`), and starting
+      virglrenderer's render server.
+   3. virglrenderer's Venus (vkr) and render server on air/OS: no
+      eventfd/signalfd/memfd there, thread workers, and shared memory
+      as locked areas passed between the processes. Host-visible Vulkan
+      memory cannot be exported (NVK on NVIDIA's RM has no dma-buf or
+      opaque-fd export) but can be imported
+      (`VK_EXT_external_memory_host`): vkr allocates such memory as a
+      shared locked area and imports it.
+   4. Android's window buffers: gralloc hands Vulkan apps buffers that
+      are GL (virgl) resources, which Venus can only use when the host
+      exports them as dma-bufs. Needs either that export in nvidia_rm
+      and NVK, or gralloc buffers both renderers can use (shared-memory
+      blobs). Open research.
+   Tried earlier on Linux/KVM with lavapipe (QEMU on Xvfb, SDL GL):
+   Android enumerates the Venus device and the render server starts,
+   but rendering into gralloc buffers ends in "aborting on ring fatal
+   error" (layer 4: no GBM/dma-buf path on that host either).
 3. Done on air/OS: frames do not go through guest RAM. QEMU
    (qemu/patches/0103) listens on `present.sock` (AIRDROID_PRESENT_SOCKET)
    and reads a virgl resource with one GPU read straight into an area of
