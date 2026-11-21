@@ -11,7 +11,9 @@ air/OS:
 * **No copies over a wire**: guest RAM is a shared file, so the app reads
   Android's frame buffers in place.
 * **GPU acceleration**: Android's OpenGL ES runs on the host GPU through
-  virgl (virglrenderer on air/OS's Mesa); Vulkan (Venus) is next.
+  virgl (virglrenderer on air/OS's Mesa), and its frames are read from
+  GPU memory straight into the windows. Vulkan on the host GPU (Venus)
+  is a choice in the settings window, still experimental.
 
 What works, as in Waydroid: installing apps from `.apk` files (open one,
 or `airdroid app install`), each app in its own resizable window or the
