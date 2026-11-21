@@ -152,9 +152,11 @@ virgl, not the host path.
       airDroid (a process with a live NVK device and imported host
       memory forks a child that uses the GPU): a bug in air/OS or its
       NVIDIA driver glue, not found yet.
-   4. Android's window buffers: works on the X399 on branch
-      `venus-wsi`, not stable yet. With `debug.hwui.renderer=skiavk`
-      (props.override on the data disk) Android's UI renders through
+   4. Android's window buffers: work on the X399. With
+      `debug.hwui.renderer=skiavk` (a line in props.override on the
+      data disk; Android's UI stays on GL otherwise, and Vulkan apps
+      use Venus either way with `gpu: "venus"`) Android's UI renders
+      through
       Venus on NVK: Settings shows and scrolls (328 frames, 0.9 % janky,
       median 13 ms, 99th percentile 26 ms; the host reads a frame in
       0.7 ms, GL frames take 1.1-1.6 ms). How:
@@ -178,18 +180,25 @@ virgl, not the host path.
         no sync fd export on fences and semaphores, and 8192 file
         descriptors for QEMU and the render server (NVK opens one per
         memory mapping; air/OS gives 256).
-      Open: of five runs, two showed and scrolled, two hung shortly
-      after boot (QEMU and the render server both waiting, no CPU use;
-      Debugger's report of the live QEMU has no stacks) and one crashed
-      the render server; GL consumers of a Vulkan-rendered buffer (SurfaceFlinger's
+      Six sessions in a row on the X399 (boot, Settings, scroll, quit):
+      each on the Vulkan pipeline with about 370 frames, nothing left
+      behind on quit. Two hangs on the way there were ours: a wait for
+      an exported semaphore that stalled the host queue, and the
+      render server deleting a window buffer's area while the driver
+      still had its pages pinned for a Vulkan import (delete_area()
+      waits; the worker that waited also delivers the context's
+      fences). Each import now maps the area by itself.
+      Open: GL consumers of a Vulkan-rendered buffer (SurfaceFlinger's
       own composition, screenshots) see the GL texture, not the shadow;
-      a shadow is filled from GL once, when Venus attaches the buffer.
-      Host bugs met on the way (air/OS, not airDroid): a render server
-      that dies with host memory imported cannot be reaped (its team
-      stays, the pages pinned), and the machine has reset or hung with
-      such teams around; see also the fork bug above. The default mode
-      is the same on this branch as on main (X399: 19.2 s to boot, 96-102
-      ms for the scroll test).
+      a shadow is filled from GL once, when Venus attaches the buffer;
+      one render server crash early on was not seen again and not
+      explained; only Android's own UI (Skia) has been run on it, no
+      third-party Vulkan app or game yet.
+      Host bug met on the way (air/OS, not airDroid): the X399 reset or
+      hung several times while a render server was stuck like that; a
+      stuck process should not take the machine down. See also the
+      fork bug above. The default mode is unchanged by all this (X399:
+      19.7 s to boot, 94 ms for the scroll test).
    Tried earlier on Linux/KVM with lavapipe (QEMU on Xvfb, SDL GL):
    Android enumerates the Venus device and the render server starts,
    but rendering into gralloc buffers ends in "aborting on ring fatal
