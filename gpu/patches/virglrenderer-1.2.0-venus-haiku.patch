@@ -410,6 +410,56 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
        else if (!strcmp(props->extensionName, "VK_KHR_external_fence_fd"))
           physical_dev->KHR_external_fence_fd = true;
  
+@@ -754,10 +793,27 @@
+       vkr_physical_device_from_handle(args->physicalDevice);
+    struct vn_physical_device_proc_table *vk = &physical_dev->proc_table;
+ 
++   const bool emulate_sync_fd =
++      physical_dev->host_pointer_import &&
++      args->pExternalSemaphoreInfo->handleType ==
++         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
++
+    vn_replace_vkGetPhysicalDeviceExternalSemaphoreProperties_args_handle(args);
+    vk->GetPhysicalDeviceExternalSemaphoreProperties(args->physicalDevice,
+                                                     args->pExternalSemaphoreInfo,
+                                                     args->pExternalSemaphoreProperties);
++
++   /* No sync files here: vkr stands in for them (vkr_queue.c), which is all
++    * the client driver's sync fd support (Android's window buffers) asks of
++    * the renderer.
++    */
++   if (emulate_sync_fd) {
++      VkExternalSemaphoreProperties *props = args->pExternalSemaphoreProperties;
++      props->exportFromImportedHandleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
++      props->compatibleHandleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
++      props->externalSemaphoreFeatures = VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT |
++                                         VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
++   }
+ }
+ 
+ static void
+@@ -769,9 +825,21 @@
+       vkr_physical_device_from_handle(args->physicalDevice);
+    struct vn_physical_device_proc_table *vk = &physical_dev->proc_table;
+ 
++   const bool emulate_sync_fd =
++      physical_dev->host_pointer_import &&
++      args->pExternalFenceInfo->handleType == VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
++
+    vn_replace_vkGetPhysicalDeviceExternalFenceProperties_args_handle(args);
+    vk->GetPhysicalDeviceExternalFenceProperties(
+       args->physicalDevice, args->pExternalFenceInfo, args->pExternalFenceProperties);
++
++   if (emulate_sync_fd) {
++      VkExternalFenceProperties *props = args->pExternalFenceProperties;
++      props->exportFromImportedHandleTypes = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
++      props->compatibleHandleTypes = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
++      props->externalFenceFeatures = VK_EXTERNAL_FENCE_FEATURE_EXPORTABLE_BIT |
++                                     VK_EXTERNAL_FENCE_FEATURE_IMPORTABLE_BIT;
++   }
+ }
+ 
+ static void
 --- a/src/venus/vkr_physical_device.h
 +++ b/src/venus/vkr_physical_device.h
 @@ -23,6 +23,7 @@
@@ -434,6 +484,100 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
     VkQueueFamilyProperties *queue_family_properties;
     uint32_t queue_family_property_count;
  
+--- a/src/venus/vkr_queue.c
++++ b/src/venus/vkr_queue.c
+@@ -470,6 +470,25 @@
+                                  args->waitAll, args->timeout);
+ }
+ 
++/* Sync files stand between the client driver and the renderer in three
++ * places (below). Where the renderer's system has none (air/OS) but its
++ * memory comes from us (host_pointer_import), vkr does what each of them is
++ * for with the fences and semaphores themselves.
++ */
++static inline bool
++vkr_device_emulates_sync_fd(const struct vkr_device *dev)
++{
++   return dev->physical_device->host_pointer_import;
++}
++
++static VkQueue
++vkr_device_any_queue(struct vkr_device *dev)
++{
++   list_for_each_entry (struct vkr_queue, queue, &dev->queues, base.track_head)
++      return queue->base.handle.queue;
++   return VK_NULL_HANDLE;
++}
++
+ static void
+ vkr_dispatch_vkResetFenceResourceMESA(struct vn_dispatch_context *dispatch,
+                                       struct vn_command_vkResetFenceResourceMESA *args)
+@@ -481,6 +500,19 @@
+ 
+    vn_replace_vkResetFenceResourceMESA_args_handle(args);
+ 
++   if (vkr_device_emulates_sync_fd(dev)) {
++      /* Exporting a sync fd leaves the fence reset once its submission is
++       * done; the client has its own sync for that submission already.
++       */
++      VkResult result = vk->WaitForFences(args->device, 1, &args->fence, VK_TRUE,
++                                          5ull * 1000 * 1000 * 1000);
++      if (result == VK_SUCCESS || result == VK_TIMEOUT)
++         result = vk->ResetFences(args->device, 1, &args->fence);
++      if (result != VK_SUCCESS)
++         vkr_context_set_fatal(ctx);
++      return;
++   }
++
+    const VkFenceGetFdInfoKHR info = {
+       .sType = VK_STRUCTURE_TYPE_FENCE_GET_FD_INFO_KHR,
+       .fence = args->fence,
+@@ -555,6 +587,24 @@
+ 
+    vn_replace_vkWaitSemaphoreResourceMESA_args_handle(args);
+ 
++   if (vkr_device_emulates_sync_fd(dev)) {
++      /* Exporting a sync fd takes the semaphore's signal: a submission that
++       * waits for it does the same.
++       */
++      const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
++      const VkSubmitInfo submit = {
++         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
++         .waitSemaphoreCount = 1,
++         .pWaitSemaphores = &args->semaphore,
++         .pWaitDstStageMask = &stage,
++      };
++      const VkQueue queue = vkr_device_any_queue(dev);
++      if (queue == VK_NULL_HANDLE ||
++          vk->QueueSubmit(queue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS)
++         vkr_context_set_fatal(ctx);
++      return;
++   }
++
+    const VkSemaphoreGetFdInfoKHR info = {
+       .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
+       .semaphore = args->semaphore,
+@@ -586,6 +636,20 @@
+    /* resourceId 0 is for importing a signaled payload to sync_fd fence */
+    assert(!res_info->resourceId);
+ 
++   if (vkr_device_emulates_sync_fd(dev)) {
++      /* a signaled payload: a submission that only signals it */
++      const VkSubmitInfo submit = {
++         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
++         .signalSemaphoreCount = 1,
++         .pSignalSemaphores = &res_info->semaphore,
++      };
++      const VkQueue queue = vkr_device_any_queue(dev);
++      if (queue == VK_NULL_HANDLE ||
++          vk->QueueSubmit(queue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS)
++         vkr_context_set_fatal(ctx);
++      return;
++   }
++
+    const VkImportSemaphoreFdInfoKHR import_info = {
+       .sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
+       .semaphore = res_info->semaphore,
 --- a/src/virglrenderer.c
 +++ b/src/virglrenderer.c
 @@ -50,6 +50,7 @@
