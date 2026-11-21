@@ -105,13 +105,13 @@ impl VmConfig {
         socket_dir(&self.state_dir).join("airdroid.sock")
     }
     /// QEMU's socket for reading GPU frames straight into the app's window
-    /// bitmaps (qemu/patches/0103): on air/OS with gpu=virgl and
+    /// bitmaps (qemu/patches/0103): on air/OS with a GPU (virgl, venus) and
     /// `host_present`, unless AIRDROID_PRESENT=guest (the guest copies
     /// frames into its RAM first).
     pub fn present_socket(&self) -> Option<PathBuf> {
         let on = cfg!(target_os = "haiku")
             && self.host_present
-            && self.gpu == "virgl"
+            && (self.gpu == "virgl" || self.gpu == "venus")
             && std::env::var("AIRDROID_PRESENT").map_or(true, |v| v != "guest");
         on.then(|| socket_dir(&self.state_dir).join("present.sock"))
     }
@@ -212,6 +212,12 @@ impl VmConfig {
         let mut cmd = Command::new(&self.qemu);
         for (k, v) in &self.env {
             cmd.env(k, v);
+        }
+        if self.gpu == "venus" {
+            // Venus runs in virglrenderer's render server, next to QEMU
+            if let Some(dir) = self.qemu.parent() {
+                cmd.env("RENDER_SERVER_EXEC_PATH", dir.join("virgl_render_server"));
+            }
         }
         if let Some(s) = self.present_socket() {
             let _ = std::fs::remove_file(&s);
