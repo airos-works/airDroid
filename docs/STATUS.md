@@ -152,20 +152,41 @@ virgl, not the host path.
       airDroid (a process with a live NVK device and imported host
       memory forks a child that uses the GPU): a bug in air/OS or its
       NVIDIA driver glue, not found yet.
-   4. Android's window buffers, open. Probed in the nested VM (Android's
-      UI on Vulkan, `debug.hwui.renderer=skiavk`): HWUI aborts with
-      "Assertion failed: !hasKHRSwapchainExtension". Mesa's Venus
-      driver in the guest offers VK_ANDROID_native_buffer (which
-      Android's swapchain is built on) only when the host renderer has
-      dma-buf import, VK_EXT_image_drm_format_modifier,
-      VK_EXT_queue_family_foreign, and sync-fd fence export and
-      semaphore import. air/OS has no dma-bufs or sync files (NVK on
-      NVIDIA's RM lists the extensions and cannot do either; lavapipe
-      22 lacks them). Plan: emulate them in vkr on air/OS. A gralloc
-      buffer a Vulkan app renders to gets a shared locked area as its
-      memory (host pointer import, linear), which QEMU's present path
-      then reads instead of the GL texture (no GPU read-back at all);
-      fences and semaphores are waited for and signalled in vkr.
+   4. Android's window buffers: works on the X399 on branch
+      `venus-wsi`, not stable yet. With `debug.hwui.renderer=skiavk`
+      (props.override on the data disk) Android's UI renders through
+      Venus on NVK: Settings shows and scrolls (328 frames, 0.9 % janky,
+      median 13 ms, 99th percentile 26 ms; the host reads a frame in
+      0.7 ms, GL frames take 1.1-1.6 ms). How:
+      * Mesa's Venus driver in the guest offers Android's window buffer
+        support only if the renderer has dma-buf import, DRM format
+        modifiers, a foreign queue family and sync fds. NVK on NVIDIA's
+        RM lists them all and has neither dma-bufs nor sync files: vkr
+        answers the sync fd queries itself and does what the three
+        resource commands are for with the fences and semaphores.
+      * A gralloc buffer is a GL (virgl) resource that cannot be
+        exported: when Venus attaches one, virglrenderer gives it a
+        shadow, a shared locked area with the resource's rows (at a
+        pitch of whole 32 bytes: NVIDIA samples a linear image only at
+        such a pitch), which vkr imports as host memory for the image.
+        The GPU renders straight into it (`tools/dev/vkimage.c`: 5.3 ms
+        a 1280x720 frame with submit and wait), and reads of the
+        resource (the present path) come from it: no GPU read-back.
+      * Also needed: host memory types shown to the guest as device
+        local (Skia takes a hardware buffer only then), device creation
+        retried at medium queue priority (NVK refuses Android's high),
+        no sync fd export on fences and semaphores, and 8192 file
+        descriptors for QEMU and the render server (NVK opens one per
+        memory mapping; air/OS gives 256).
+      Open: one run crashed the render server and one hung right after
+      boot (not reproduced since; debug_server now writes reports for
+      it); GL consumers of a Vulkan-rendered buffer (SurfaceFlinger's
+      own composition, screenshots) see the GL texture, not the shadow;
+      a shadow is filled from GL once, when Venus attaches the buffer.
+      Host bugs met on the way (air/OS, not airDroid): a render server
+      that dies with host memory imported cannot be reaped (its team
+      stays, the pages pinned), and the machine has reset or hung with
+      such teams around; see also the fork bug above.
    Tried earlier on Linux/KVM with lavapipe (QEMU on Xvfb, SDL GL):
    Android enumerates the Venus device and the render server starts,
    but rendering into gralloc buffers ends in "aborting on ring fatal
