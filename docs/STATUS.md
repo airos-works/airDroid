@@ -179,7 +179,7 @@ airDroid's CPU time each.
   same picture.
 * What is left to blend goes in bands, a thread each, when it is large.
 
-After: 283-292 of Android's 292-305 frames on screen, 30 % janky, 8.7 ms
+After: 262-292 of Android's 271-305 frames on screen, 30-39 % janky, 8.7-9 ms
 of airDroid's CPU time a frame; a tenth of the screen repainted on
 average, 3.8 ms to read and compose it. The window is the same picture
 as Android's own screenshot (no pixel more than 5/255 off). What is
