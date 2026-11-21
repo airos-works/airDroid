@@ -134,13 +134,17 @@ virgl, not the host path.
       `nvmm_hva_map_existing()` registers part of a fully locked area
       instead, so memory shared with the render server can appear in
       the guest's blob window. Test: `libnvmm_hva_existing`.
-   2. Written, builds, not run (branch `venus`): QEMU registers blob
-      memory through `nvmm_hva_map_existing` (patch 0104) and starts
+   2. Works in the nested test VM (branch `venus`): QEMU registers
+      blob memory through `nvmm_hva_map_existing` (patch 0104), tells
+      the guest NVMM's address width (37 bits, so the blob window lands
+      where NVMM maps), does not offer GL blob buffers, and starts
       virglrenderer's render server (packaged next to QEMU).
-   3. Written, builds, not run (branch `venus`): virglrenderer's Venus
-      (vkr) and render server on air/OS: thread workers (no signalfd
-      there), and shared memory as locked areas passed between the
-      processes (`virgl_shm.h`). Host-visible Vulkan
+   3. Works in the nested test VM with lavapipe (branch `venus`):
+      virglrenderer's Venus (vkr) and render server on air/OS: thread
+      workers (no signalfd there), and shared memory as locked areas
+      passed between the processes (`virgl_shm.h`). Android's
+      `cmd gpu vkjson` lists "Virtio-GPU Venus (llvmpipe ...)", driver
+      venus. Not yet on a GPU (NVK on the X399). Host-visible Vulkan
       memory cannot be exported (NVK on NVIDIA's RM has no dma-buf or
       opaque-fd export) but can be imported
       (`VK_EXT_external_memory_host`): vkr allocates such memory as a
