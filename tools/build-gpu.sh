@@ -68,21 +68,30 @@ fi
 
 # virglrenderer: the host side of virtio-gpu 3D (OpenGL through EGL)
 v=$W/virglrenderer-$VIRGL_VERSION
-if [[ ! -f $v/.patched ]]; then
+# A tree from other patches or options is not this build's: a kept one
+# once shipped a virglrenderer without Venus next to a QEMU that had it.
+virgl_opts=(-Dplatforms=egl -Dminigbm_allocation=false -Dvenus=$VENUS -Drender-server-worker=thread
+	-Dtests=false -Dfuzzer=false -Dvalgrind=false -Dtracing=none -Dcheck-gl-errors=false)
+stamp=$(cat "$ROOT"/gpu/patches/virglrenderer-$VIRGL_VERSION-*.patch 2>/dev/null \
+	| { cat; echo "${virgl_opts[*]}"; } | sha256sum | cut -c1-16)
+if [[ ! -f $v/.patched-$stamp ]]; then
 	rm -rf "$v"
 	tar -C "$W" -xf "$(fetch "https://gitlab.freedesktop.org/virgl/virglrenderer/-/archive/$VIRGL_VERSION/virglrenderer-$VIRGL_VERSION.tar.gz" "virglrenderer-$VIRGL_VERSION.tar.gz")"
 	for p in "$ROOT"/gpu/patches/virglrenderer-$VIRGL_VERSION-*.patch; do
 		[[ -f $p ]] && patch -d "$v" -p1 -s < "$p"
 	done
-	touch "$v/.patched"
+	touch "$v/.patched-$stamp"
 fi
 # Venus runs in virglrenderer's render server (thread workers: no
 # signalfd/clone on air/OS), which QEMU starts (RENDER_SERVER_EXEC_PATH)
-[[ -f $v/build/build.ninja ]] || meson setup "$v/build" "$v" "${meson_args[@]}" -Dplatforms=egl -Dminigbm_allocation=false \
-	-Dvenus=$VENUS -Drender-server-worker=thread -Dtests=false -Dfuzzer=false -Dvalgrind=false -Dtracing=none -Dcheck-gl-errors=false > "$W/virgl-setup.log"
+[[ -f $v/build/build.ninja ]] || meson setup "$v/build" "$v" "${meson_args[@]}" "${virgl_opts[@]}" > "$W/virgl-setup.log"
 ninja -C "$v/build" > "$W/virgl-build.log"
 DESTDIR=$deps meson install -C "$v/build" --no-rebuild > /dev/null
 rm -f "$Q/virgl_render_server"
+if [[ $VENUS == true && ! -f $v/build/server/virgl_render_server ]]; then
+	echo "build-gpu: Venus is on but virgl_render_server was not built" >&2
+	exit 1
+fi
 if [[ -f $v/build/server/virgl_render_server ]]; then
 	"${CROSS}strip" -o "$Q/virgl_render_server" "$v/build/server/virgl_render_server"
 	patchelf --force-rpath --set-rpath '$ORIGIN/lib' "$Q/virgl_render_server"
