@@ -112,10 +112,17 @@ Zink on NVK on NVIDIA's resource manager):
 | | airDroid on air/OS |
 |---|---|
 | Android boot (start to `sys.boot_completed`) | 19.2 s (21 s from starting the app) |
-| Settings cold start (`am start -W`, TotalTime) | 475-519 ms |
-| Clock cold start | 506 ms |
-| Scroll test (6 swipe pairs in Settings) | 305-332 frames, 0-0.3 % janky |
-| Frame time, median / 90th / 99th percentile | 5-6 / 7-9 / 9-18 ms |
+| Settings cold start (`am start -W`, TotalTime) | 471-486 ms |
+| Clock cold start | 580 ms (WaitTime 587-818 ms) |
+| Scroll test (6 swipe pairs in Settings) | 305-331 frames, 0.3-0.7 % janky, every one on screen (302-326 host frames) |
+| Frame time, median / 90th / 99th percentile | 8-23 / 20-28 / 22-42 ms over six runs |
+| airDroid's own CPU time for the test | 94-107 ms |
+
+Measure with the app's window on screen: start it once with
+`airdroid app launch` (a bare `am start` leaves `waydroid.active_apps`
+unset, the hardware composer then shows nothing, and frame times come
+out at 5-6 ms because nothing is presented; a first version of this
+table had that mistake).
 
 Waydroid's side on the same machine: not measured yet. The attempt
 (2026-11-21) was to boot a Linux live image from the lab KVM's virtual
