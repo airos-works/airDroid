@@ -1,0 +1,31 @@
+--- a/server/render_worker.c
++++ b/server/render_worker.c
+@@ -24,7 +24,9 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <signal.h>
++#ifndef ENABLE_RENDER_SERVER_WORKER_THREAD
+ #include <sys/signalfd.h>
++#endif
+ #include <sys/types.h>
+ #include <sys/wait.h>
+ #include <threads.h>
+@@ -321,6 +323,10 @@
+    if (jail->sigchld_fd < 0)
+       return true;
+ 
++#ifdef ENABLE_RENDER_SERVER_WORKER_THREAD
++   /* thread workers: no SIGCHLD fd (and no signalfd() everywhere) */
++   return true;
++#else
+    do {
+       struct signalfd_siginfo siginfos[8];
+       const ssize_t r = read(jail->sigchld_fd, siginfos, sizeof(siginfos));
+@@ -334,6 +340,7 @@
+    } while (true);
+ 
+    return true;
++#endif
+ }
+ 
+ bool

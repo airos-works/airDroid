@@ -1,0 +1,135 @@
+--- a/target/i386/nvmm/nvmm-all.c
++++ b/target/i386/nvmm/nvmm-all.c
+@@ -16,6 +16,8 @@
+ #include "system/nvmm.h"
+ #include "system/cpus.h"
+ #include "system/memory.h"
++#include "system/ramblock.h"
++#include "system/ram_addr.h"
+ #include "system/runstate.h"
+ #include "qemu/main-loop.h"
+ #include "qemu/error-report.h"
+@@ -1083,6 +1085,19 @@
+ 
+ /* -------------------------------------------------------------------------- */
+ 
++#ifdef __HAIKU__
++/* host address -> size of what went through nvmm_hva_map_existing() */
++static GHashTable *nvmm_haiku_existing;
++
++/* Not guest RAM for the cooperating process' map: a renderer's memory. */
++static bool
++nvmm_haiku_is_existing(uintptr_t hva)
++{
++    return nvmm_haiku_existing != NULL
++        && g_hash_table_contains(nvmm_haiku_existing, (void *)hva);
++}
++#endif
++
+ static void
+ nvmm_update_mapping(hwaddr start_pa, ram_addr_t size, uintptr_t hva,
+     bool add, bool rom, const char *name)
+@@ -1097,13 +1112,13 @@
+         }
+         ret = nvmm_gpa_map(mach, hva, start_pa, size, prot);
+ #ifdef __HAIKU__
+-        if (ret == 0 && !rom) {
++        if (ret == 0 && !rom && !nvmm_haiku_is_existing(hva)) {
+             nvmm_haiku_log_mapping(start_pa, size, hva, true);
+         }
+ #endif
+     } else {
+ #ifdef __HAIKU__
+-        if (!rom) {
++        if (!rom && !nvmm_haiku_is_existing(hva)) {
+             nvmm_haiku_log_mapping(start_pa, size, hva, false);
+         }
+ #endif
+@@ -1199,6 +1214,65 @@
+     .priority = MEMORY_LISTENER_PRIORITY_ACCEL,
+ };
+ 
++#ifdef __HAIKU__
++/*
++ * airDroid: memory QEMU was handed (memory_region_init_ram_ptr(): a
++ * virtio-gpu blob, shared with the renderer's process) has to stay what it
++ * is, where nvmm_hva_map() would replace it with new anonymous memory.
++ * air/OS's NVMM takes such memory with nvmm_hva_map_existing() (a fully
++ * locked area; libnvmm has it since November 2026, hence weak).
++ */
++extern int nvmm_hva_map_existing(struct nvmm_machine *, uintptr_t, size_t)
++    __attribute__((weak));
++
++static bool
++nvmm_haiku_map_existing(struct nvmm_machine *mach, void *host, size_t size)
++{
++    ram_addr_t offset;
++    RAMBlock *rb;
++    bool prealloc;
++
++    WITH_RCU_READ_LOCK_GUARD() {
++        rb = qemu_ram_block_from_host(host, false, &offset);
++        prealloc = rb != NULL && (rb->flags & RAM_PREALLOC) != 0;
++    }
++    if (!prealloc) {
++        return false;
++    }
++    if (nvmm_hva_map_existing == NULL
++        || nvmm_hva_map_existing(mach, (uintptr_t)host, size) == -1) {
++        warn_report("NVMM: cannot share HostVA:%p Size:%p with the guest "
++            "as it is (%s); it gets new memory", host, (void *)size,
++            nvmm_hva_map_existing == NULL ? "this air/OS is too old"
++                : strerror(errno));
++        return false;
++    }
++    if (nvmm_haiku_existing == NULL) {
++        nvmm_haiku_existing = g_hash_table_new(NULL, NULL);
++    }
++    g_hash_table_insert(nvmm_haiku_existing, host, (gpointer)size);
++    return true;
++}
++
++static void
++nvmm_ram_block_removed(RAMBlockNotifier *n, void *host, size_t size,
++                       size_t max_size)
++{
++    gpointer mapped;
++
++    if (nvmm_haiku_existing != NULL
++        && g_hash_table_lookup_extended(nvmm_haiku_existing, host, NULL,
++            &mapped)) {
++        g_hash_table_remove(nvmm_haiku_existing, host);
++        if (nvmm_hva_unmap(get_nvmm_mach(), (uintptr_t)host,
++                (size_t)mapped) == -1) {
++            error_report("NVMM: Failed to unmap HVA, HostVA:%p error=%d",
++                host, errno);
++        }
++    }
++}
++#endif
++
+ static void
+ nvmm_ram_block_added(RAMBlockNotifier *n, void *host, size_t size,
+                      size_t max_size)
+@@ -1207,6 +1281,11 @@
+     uintptr_t hva = (uintptr_t)host;
+     int ret;
+ 
++#ifdef __HAIKU__
++    if (nvmm_haiku_map_existing(mach, host, max_size)) {
++        return;
++    }
++#endif
+     ret = nvmm_hva_map(mach, hva, max_size);
+ #ifdef __HAIKU__
+     if (ret == 0) {
+@@ -1227,6 +1306,9 @@
+ }
+ 
+ static struct RAMBlockNotifier nvmm_ram_notifier = {
++#ifdef __HAIKU__
++    .ram_block_removed = nvmm_ram_block_removed,
++#endif
+     .ram_block_added = nvmm_ram_block_added
+ };
+ 
