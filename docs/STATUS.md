@@ -175,8 +175,10 @@ machine's Android after the hang above). airDroid now sets
 
 ## Not yet
 
-* Vulkan on the GPU (Venus): see the plan below; Android's Vulkan is
-  lavapipe (CPU) under virgl, SwiftShader otherwise.
+* Vulkan on the GPU (Venus) by default: it is a choice in the settings
+  window, experimental (see the plan below; verified on one GPU, a
+  GTX 1070 on NVK); otherwise Android's Vulkan is lavapipe (CPU) under
+  virgl, SwiftShader without a GPU.
 * Camera and sensors (Waydroid has neither either).
 * Toasts and system dialogs in multi-window mode: they belong to no app's
   task, so (as in Waydroid) no window shows them; crash and "not
@@ -190,9 +192,10 @@ machine's Android after the hang above). airDroid now sets
 ## GPU plan
 
 1. Done: virgl (GL) through virglrenderer on EGL.
-2. Venus (Vulkan), experimental: `"gpu": "venus"` in settings.json (not
-   in the settings window; Vulkan apps use lavapipe on the CPU
-   otherwise). Android lists the host's GPU as its Vulkan device
+2. Venus (Vulkan), experimental: "The GPU, Vulkan too (experimental)"
+   under Graphics in the settings window (`"gpu": "venus"` in
+   settings.json); Vulkan apps use lavapipe on the CPU otherwise, and
+   a build without the render server falls back to virgl. Android lists the host's GPU as its Vulkan device
    ("Virtio-GPU Venus (NVIDIA GeForce GTX 1070 (NVK GP104-A))" on the
    X399, "... (llvmpipe ...)" in the nested VM), with GL next to it as
    before, but Vulkan apps cannot show windows yet (layer 4). In layers:

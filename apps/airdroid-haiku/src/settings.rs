@@ -19,8 +19,8 @@ pub struct Settings {
     pub flavour: String,
     /// Send mouse clicks as touches (some games want touch).
     pub mouse_as_touch: bool,
-    /// "auto" (virgl when there is a GPU with EGL), "virgl" or "none";
-    /// "venus" (virgl and Vulkan through Venus, experimental) only by hand.
+    /// "auto" (virgl when there is a GPU with EGL), "virgl", "none", or
+    /// "venus" (virgl, and Vulkan through Venus: experimental).
     pub gpu: String,
     /// The folder shared with Android (as /sdcard/airOS); "~/" is the home
     /// folder, empty shares nothing.
@@ -69,7 +69,7 @@ impl Settings {
                         self.cpus = n.clamp(1, 64);
                     }
                 }
-                "gpu" if ["auto", "virgl", "none"].contains(&v) => self.gpu = v.to_string(),
+                "gpu" if ["auto", "virgl", "none", "venus"].contains(&v) => self.gpu = v.to_string(),
                 "dpi" => {
                     if let Ok(n) = v.parse() {
                         self.dpi = n;
@@ -102,5 +102,7 @@ mod tests {
         assert_eq!(s.shared_folder, "");
         s.apply_text("gpu=fast\nram=x\nshare=/boot/home/Shared\n");
         assert_eq!((s.gpu.as_str(), s.ram_mb, s.shared_folder.as_str()), ("none", 6144, "/boot/home/Shared"));
+        s.apply_text("gpu=venus\n");
+        assert_eq!(s.gpu, "venus");
     }
 }

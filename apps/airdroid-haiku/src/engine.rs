@@ -442,11 +442,14 @@ impl Engine {
         // GPU: virgl when QEMU has it and a Mesa with EGL can drive a GPU
         let qemu_gl = res.qemu.parent().map(|d| d.join("lib/libvirglrenderer.so.1").exists()).unwrap_or(false);
         let gl = if qemu_gl { crate::paths::gl_environment() } else { None };
+        // Venus (Vulkan) needs virglrenderer's render server next to QEMU
+        let venus = res.qemu.parent().map(|d| d.join("virgl_render_server").exists()).unwrap_or(false);
         let (gpu, env) = match (self.settings.gpu.as_str(), gl) {
             ("none", _) | (_, None) => ("none".to_string(), Vec::new()),
             ("virgl", Some((env, _))) => ("virgl".to_string(), env),
-            // experimental, only from settings.json: Vulkan through Venus
-            ("venus", Some((env, _))) => ("venus".to_string(), env),
+            // experimental: Vulkan through Venus as well
+            ("venus", Some((env, _))) if venus => ("venus".to_string(), env),
+            ("venus", Some((env, _))) => ("virgl".to_string(), env),
             (_, Some((env, true))) => ("virgl".to_string(), env),
             (_, Some(_)) => ("none".to_string(), Vec::new()), // llvmpipe only: SwiftShader is faster
         };

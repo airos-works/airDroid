@@ -294,6 +294,7 @@ mod imp {
         let gpu = match s.gpu.as_str() {
             "virgl" => 1,
             "none" => 2,
+            "venus" => 3,
             _ => 0,
         };
         unsafe { ffi::ad_settings_show(s.ram_mb as u32, s.cpus, gpu, s.dpi, s.mouse_as_touch as i32, c(&s.shared_folder).as_ptr()) }
