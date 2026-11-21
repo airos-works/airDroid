@@ -19,10 +19,12 @@
 
 * GPU rendering, phase 1 (virgl): Android's GL goes through Mesa's virgl
   driver to virglrenderer in airDroid's QEMU, on the host's GPU through
-  EGL (AMD: radeonsi; NVIDIA: Zink on NVK; no GPU: llvmpipe). Frames are
-  read back into guest pages and shown as before. `gpu` setting:
-  auto (virgl when there is a GPU), virgl, none (SwiftShader).
-  Verified in the test VM with llvmpipe; not yet on GPU hardware.
+  EGL (AMD: radeonsi; NVIDIA: Zink on NVK; no GPU: llvmpipe). On air/OS
+  QEMU reads finished frames straight into the app's window bitmaps
+  (qemu/patches/0103, below); elsewhere the guest reads them back into
+  its pages. `gpu` setting: auto (virgl when there is a GPU), virgl,
+  none (SwiftShader). Verified on the X399 (GTX 1080 Ti, Zink on NVK)
+  and in the test VM with llvmpipe.
 
 * Settings window (Android > Settings…): memory, processors, graphics
   (automatic, the GPU, software), screen density, mouse clicks as
@@ -85,11 +87,17 @@ The app's CPU time while Android scrolls Settings (multi-window, virgl,
 | before (per-pixel compose, canvas copy) | 595-616 ms | ~1.9 ms |
 | fast compose paths (29a5d23) | 327-339 ms | ~1.0 ms |
 | composing into the window's bitmap (24971f0) | 244-246 ms | ~0.75 ms |
+| QEMU reads GPU frames into the bitmap (present=host) | 84-99 ms | ~0.28 ms |
+
+The last row also removes the guest's read-back: it took 2.93 ms per
+frame (average, 7.3 ms at most; a TRANSFER_FROM_HOST and waiting for
+it); the guest now only waits for Android's rendering (0.00-0.01 ms).
+QEMU reads a frame into the window in 1.4-1.6 ms, and its own CPU time
+did not grow (7.8-8.5 s over the run, mostly Android's vCPUs, as before).
 
 On the build host (Xeon E5-2650 v4) composing a 1920x1080 frame: opaque
 XRGB + translucent bar 7.9 -> 1.4 ms; an RGBA app window that Android
-does not mark opaque 6.7 -> 1.7 ms. What remains per frame is reading
-guest memory once and app_server drawing the bitmap; Android's own
+does not mark opaque 6.7 -> 1.7 ms. Android's own
 frame times (median 10-20 ms, 0.3-1.2 % janky) come from Android and
 virgl, not the host path.
 
@@ -114,7 +122,7 @@ virgl, not the host path.
 
 ## GPU plan
 
-1. Done: virgl (GL) through virglrenderer on EGL, frames read back.
+1. Done: virgl (GL) through virglrenderer on EGL.
 2. Venus (Vulkan), experimental (`gpu: "venus"`, not offered in the
    settings window): QEMU gets blob resources, a host memory window and
    venus=on, Android `ro.hardware.vulkan=virtio` (Waydroid's vendor image
@@ -128,6 +136,17 @@ virgl, not the host path.
    existing area into the guest (blob/hostmem): NVMM's hva_map always
    replaces the range with new anonymous memory (as NetBSD's does). Both
    need GPU hardware to develop.
-3. Zero-copy display: present virtio-gpu resources straight from the
-   host's GL/Vulkan instead of reading them back (needs the resources'
-   textures shared between QEMU and the airDroid app, or QEMU presenting).
+3. Done on air/OS: frames do not go through guest RAM. QEMU
+   (qemu/patches/0103) listens on `present.sock` (AIRDROID_PRESENT_SOCKET)
+   and reads a virgl resource with one GPU read straight into an area of
+   the app's: each window's two frame bitmaps live in cloneable areas
+   that app_server and QEMU both map. A window whose frame is one
+   unscaled GPU layer (over the background colour, or opaque) is read
+   into its back bitmap and nothing composes it; other frames have QEMU
+   fill the layers' guest backing and are composed as before. The guest
+   (airdroid.present=host on its command line) only waits for Android's
+   rendering. AIRDROID_PRESENT=guest goes back to the guest's read-back.
+   What is left is the one read from GPU memory per frame: app_server
+   draws from main memory, so showing a frame without it would need the
+   window's pixels on the GPU (as Summit's and the Crafts' direct
+   scanout path does for Vulkan).

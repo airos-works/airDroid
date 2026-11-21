@@ -172,6 +172,13 @@ pub enum ToHost {
     BufferDestroy {
         id: u32,
     },
+    /// Buffer `id` (just announced) is virtio-gpu resource `resource`, and
+    /// the guest does not copy it into its RAM: the host has QEMU read it
+    /// (gpu=virgl with airdroid.present=host).
+    BufferGpu {
+        id: u32,
+        resource: u32,
+    },
     /// A top-level window (an Android task, or the whole UI).
     WindowNew {
         id: u32,

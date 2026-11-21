@@ -1,0 +1,194 @@
+--- a/hw/display/virtio-gpu-virgl.c
++++ b/hw/display/virtio-gpu-virgl.c
+@@ -12,6 +12,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include <glib-unix.h>
+ #include "qemu/error-report.h"
+ #include "qemu/iov.h"
+ #include "trace.h"
+@@ -1139,6 +1140,174 @@
+     virgl_renderer_reset();
+ }
+ 
++
++/*
++ * airDroid: the host app reads virgl resources (Android's frames) straight
++ * into its window bitmaps, instead of the guest copying them into guest RAM
++ * first (TRANSFER_FROM_HOST) and the app reading them from there.
++ * AIRDROID_PRESENT_SOCKET names a Unix socket; each request is
++ * struct airdroid_present_req, each answer an int32 status (0 or -errno).
++ * The area is one of the app's (air/OS areas, B_CLONEABLE_AREA): the rows go
++ * to area + offset, stride bytes apart. area < 0: into the resource's guest
++ * backing instead.
++ */
++#ifdef __HAIKU__
++#include <OS.h>
++#endif
++#include <sys/socket.h>
++#include <sys/un.h>
++
++struct airdroid_present_req {
++    uint32_t res;
++    uint32_t x, y, w, h;
++    int32_t area;
++    uint32_t offset;
++    uint32_t stride;
++    uint32_t flags;         /* bit 0: swap red and blue (RGBA -> BGRA) */
++};
++
++#define AIRDROID_AREAS 32
++static struct {
++    int32_t id;             /* the app's area */
++    int32_t clone;
++    uint8_t *base;
++    size_t size;
++} airdroid_areas[AIRDROID_AREAS];
++static unsigned airdroid_next_area;
++
++static uint8_t *airdroid_area(int32_t id, size_t *size)
++{
++#ifdef __HAIKU__
++    for (unsigned i = 0; i < AIRDROID_AREAS; i++) {
++        if (airdroid_areas[i].base != NULL && airdroid_areas[i].id == id) {
++            *size = airdroid_areas[i].size;
++            return airdroid_areas[i].base;
++        }
++    }
++    void *addr = NULL;
++    area_id clone = clone_area("airdroid present", &addr, B_ANY_ADDRESS,
++                               B_READ_AREA | B_WRITE_AREA, id);
++    if (clone < 0) {
++        return NULL;
++    }
++    area_info info;
++    if (get_area_info(clone, &info) != B_OK) {
++        delete_area(clone);
++        return NULL;
++    }
++    unsigned slot = airdroid_next_area++ % AIRDROID_AREAS;
++    if (airdroid_areas[slot].base != NULL) {
++        delete_area(airdroid_areas[slot].clone);
++    }
++    airdroid_areas[slot].id = id;
++    airdroid_areas[slot].clone = clone;
++    airdroid_areas[slot].base = addr;
++    airdroid_areas[slot].size = info.size;
++    *size = info.size;
++    return addr;
++#else
++    return NULL;
++#endif
++}
++
++static int32_t airdroid_present(const struct airdroid_present_req *req)
++{
++    if (req->area < 0) {
++        /* into the resource's own guest backing, as TRANSFER_FROM_HOST
++           would (frames the app composes from guest RAM) */
++        struct virtio_gpu_box all = {
++            .x = req->x, .y = req->y, .z = 0, .w = req->w, .h = req->h, .d = 1,
++        };
++        return -virgl_renderer_transfer_read_iov(req->res, 0, 0, 0, 0, (struct virgl_box *)&all,
++                                                 0, NULL, 0);
++    }
++    size_t size = 0;
++    uint8_t *base = airdroid_area(req->area, &size);
++    if (base == NULL) {
++        return -ENOENT;
++    }
++    if (req->w == 0 || req->h == 0 || req->stride < req->w * 4
++        || (uint64_t)req->offset + (uint64_t)req->stride * req->h > size) {
++        return -EINVAL;
++    }
++    struct virtio_gpu_box box = {
++        .x = req->x, .y = req->y, .z = 0, .w = req->w, .h = req->h, .d = 1,
++    };
++    struct iovec iov = {
++        .iov_base = base + req->offset,
++        .iov_len = (size_t)req->stride * req->h,
++    };
++    int ret = virgl_renderer_transfer_read_iov(req->res, 0, 0, req->stride, 0,
++                                               (struct virgl_box *)&box, 0, &iov, 1);
++    if (ret != 0) {
++        return -ret;
++    }
++    if (req->flags & 1) {
++        for (uint32_t y = 0; y < req->h; y++) {
++            uint32_t *row = (uint32_t *)(base + req->offset + (size_t)y * req->stride);
++            for (uint32_t x = 0; x < req->w; x++) {
++                uint32_t v = row[x];
++                row[x] = (v & 0xff00ff00) | ((v >> 16) & 0xff) | ((v & 0xff) << 16);
++            }
++        }
++    }
++    return 0;
++}
++
++static gboolean airdroid_present_client(gint fd, GIOCondition cond, gpointer opaque)
++{
++    struct airdroid_present_req req;
++    size_t got = 0;
++    while (got < sizeof(req)) {
++        ssize_t n = read(fd, (char *)&req + got, sizeof(req) - got);
++        if (n <= 0) {
++            if (n < 0 && errno == EINTR) {
++                continue;
++            }
++            close(fd);
++            return G_SOURCE_REMOVE;
++        }
++        got += n;
++    }
++    int32_t status = airdroid_present(&req);
++    if (write(fd, &status, sizeof(status)) != sizeof(status)) {
++        close(fd);
++        return G_SOURCE_REMOVE;
++    }
++    return G_SOURCE_CONTINUE;
++}
++
++static gboolean airdroid_present_accept(gint fd, GIOCondition cond, gpointer opaque)
++{
++    int client = accept(fd, NULL, NULL);
++    if (client >= 0) {
++        g_unix_fd_add(client, G_IO_IN | G_IO_HUP | G_IO_ERR,
++                      airdroid_present_client, opaque);
++    }
++    return G_SOURCE_CONTINUE;
++}
++
++static void airdroid_present_start(VirtIOGPU *g)
++{
++    const char *path = getenv("AIRDROID_PRESENT_SOCKET");
++    if (path == NULL || *path == '\0') {
++        return;
++    }
++    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
++    if (fd < 0) {
++        return;
++    }
++    struct sockaddr_un addr = { .sun_family = AF_UNIX };
++    g_strlcpy(addr.sun_path, path, sizeof(addr.sun_path));
++    unlink(path);
++    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0 || listen(fd, 4) != 0) {
++        error_report("airdroid present: %s: %s", path, strerror(errno));
++        close(fd);
++        return;
++    }
++    g_unix_fd_add(fd, G_IO_IN, airdroid_present_accept, g);
++}
++
+ int virtio_gpu_virgl_init(VirtIOGPU *g)
+ {
+     int ret;
+@@ -1171,6 +1340,8 @@
+     gl->fence_poll = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                   virtio_gpu_fence_poll, g);
+ 
++    airdroid_present_start(g);
++
+     if (virtio_gpu_stats_enabled(g->parent_obj.conf)) {
+         gl->print_stats = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                        virtio_gpu_print_stats, g);

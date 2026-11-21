@@ -33,6 +33,8 @@ pub struct Drm {
 /// backing) and pinned.
 pub struct GpuBuffer {
     pub handle: u32,
+    /// the host's resource id
+    pub res: u32,
     pub ptr: *mut u8,
     pub len: usize,
     pub width: u32,
@@ -114,7 +116,7 @@ impl Drm {
         for off in (0..len).step_by(4096) {
             unsafe { std::ptr::read_volatile((ptr as *const u8).add(off)) };
         }
-        Ok(GpuBuffer { handle, ptr: ptr as *mut u8, len, width, height, stride })
+        Ok(GpuBuffer { handle, res: info[1], ptr: ptr as *mut u8, len, width, height, stride })
     }
 
     /// Copies the resource's current contents (host GPU memory) into its
@@ -134,6 +136,13 @@ impl Drm {
         // struct drm_virtgpu_3d_wait { u32 handle; u32 flags; }
         let mut w = [b.handle, 0u32];
         ioctl(fd, DRM_IOCTL_VIRTGPU_WAIT, &mut w)
+    }
+
+    /// Waits until the GPU work Android submitted on the resource is done
+    /// (the host reads it itself after that).
+    pub fn wait(&self, b: &GpuBuffer) -> io::Result<()> {
+        let mut w = [b.handle, 0u32];
+        ioctl(self.fd.as_raw_fd(), DRM_IOCTL_VIRTGPU_WAIT, &mut w)
     }
 
     pub fn release(&self, b: &GpuBuffer) {

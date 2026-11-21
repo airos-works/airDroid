@@ -83,7 +83,7 @@ mod ffi {
         pub fn ad_window_close(id: u32);
         pub fn ad_window_set_title(id: u32, title: *const libc::c_char);
         pub fn ad_window_resize(id: u32, w: i32, h: i32);
-        pub fn ad_window_frame_begin(id: u32, width: i32, height: i32) -> *mut u32;
+        pub fn ad_window_frame_begin(id: u32, width: i32, height: i32, area: *mut i32) -> *mut u32;
         pub fn ad_window_frame_end(id: u32);
         pub fn ad_window_present(id: u32, pixels: *const u32, w: i32, h: i32);
         pub fn ad_window_activate(id: u32);
@@ -185,12 +185,16 @@ mod imp {
     }
     /// Composes a frame straight into the window's back bitmap (`f` gets
     /// its w*h pixels) and shows it; false when there is no bitmap.
-    pub fn window_frame(id: u32, w: u32, h: u32, f: impl FnOnce(&mut [u32])) -> bool {
-        let p = unsafe { ffi::ad_window_frame_begin(id, w as i32, h as i32) };
+    /// Lets `f` write window `id`'s next frame, `w` x `h` packed B_RGB32
+    /// rows, straight into its back bitmap; `f` also gets the cloneable area
+    /// the rows start at (or -1). False if the window has no such bitmap.
+    pub fn window_frame(id: u32, w: u32, h: u32, f: impl FnOnce(&mut [u32], i32)) -> bool {
+        let mut area = -1;
+        let p = unsafe { ffi::ad_window_frame_begin(id, w as i32, h as i32, &mut area) };
         if p.is_null() {
             return false;
         }
-        f(unsafe { std::slice::from_raw_parts_mut(p, w as usize * h as usize) });
+        f(unsafe { std::slice::from_raw_parts_mut(p, w as usize * h as usize) }, area);
         unsafe { ffi::ad_window_frame_end(id) };
         true
     }
@@ -320,7 +324,7 @@ mod imp {
     pub fn window_close(id: u32) {}
     pub fn window_set_title(id: u32, title: &str) {}
     pub fn window_resize(id: u32, w: u32, h: u32) {}
-    pub fn window_frame(id: u32, w: u32, h: u32, f: impl FnOnce(&mut [u32])) -> bool {
+    pub fn window_frame(id: u32, w: u32, h: u32, f: impl FnOnce(&mut [u32], i32)) -> bool {
         false
     }
     pub fn window_present(id: u32, pixels: &[u32], w: u32, h: u32) {}

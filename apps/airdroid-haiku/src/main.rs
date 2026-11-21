@@ -13,6 +13,7 @@ mod engine;
 mod host;
 mod keys;
 mod paths;
+mod present;
 mod settings;
 
 use std::sync::mpsc;

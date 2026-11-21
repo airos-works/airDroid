@@ -19,6 +19,9 @@ pub struct Buffer {
     /// (byte offset in the buffer, host pointer, length), in order
     segs: Vec<(usize, *const u8, usize)>,
     pub valid: bool,
+    /// The virtio-gpu resource behind it, or 0 (an shm buffer, or the guest
+    /// copies the resource into guest RAM itself).
+    pub resource: u32,
 }
 unsafe impl Send for Buffer {}
 
@@ -38,13 +41,12 @@ impl Buffer {
         if off < need || format::bytes_per_pixel(format).is_none() {
             valid = false;
         }
-        Buffer { width, height, stride, format, segs, valid }
+        Buffer { width, height, stride, format, segs, valid, resource: 0 }
     }
 
     /// A buffer over host memory (tests and benchmarks).
-    #[cfg(test)]
     pub fn from_slice(data: &[u8], width: u32, height: u32, stride: u32, format: u32) -> Buffer {
-        Buffer { width, height, stride, format, segs: vec![(0, data.as_ptr(), data.len())], valid: true }
+        Buffer { width, height, stride, format, segs: vec![(0, data.as_ptr(), data.len())], valid: true, resource: 0 }
     }
 
     /// Copies `len` bytes at buffer offset `off` into `out`.

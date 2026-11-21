@@ -246,6 +246,11 @@ pub struct State {
     drm: Option<crate::drm::Drm>,
     /// GPU buffers attached since the last frames went out
     readback: Vec<ObjectId>,
+    /// (frames, total ns, longest ns, bytes) of GPU read-backs since the
+    /// last report
+    readback_stats: (u64, u64, u64, u64),
+    /// airdroid.present=host: the host has QEMU read GPU buffers itself
+    present_host: bool,
     out: OutputCfg,
     pagemap: std::fs::File,
     surfaces: HashMap<ObjectId, Surface>,
@@ -499,8 +504,30 @@ impl State {
             if let Some(drm) = &self.drm {
                 for id in std::mem::take(&mut self.readback) {
                     if let Some(g) = self.buffers.get(&id).and_then(|b| b.gpu.clone()) {
-                        if let Err(e) = drm.read_back(&g) {
+                        let t0 = sys::monotonic_ns();
+                        // the host reads it (present=host): only wait for
+                        // Android's rendering to be done
+                        let r = if self.present_host { drm.wait(&g) } else { drm.read_back(&g) };
+                        if let Err(e) = r {
                             logf!("gpu read back: {e}");
+                        }
+                        // what reading GPU frames back costs, now and then
+                        let dt = sys::monotonic_ns().saturating_sub(t0);
+                        let st = &mut self.readback_stats;
+                        st.0 += 1;
+                        st.1 += dt;
+                        st.2 = st.2.max(dt);
+                        st.3 += g.width as u64 * g.height as u64 * 4;
+                        if st.0 == 300 {
+                            logf!(
+                                "gpu {}: {} frames, {:.2} ms average, {:.2} ms at most, {:.1} MB",
+                                if self.present_host { "wait" } else { "read back" },
+                                st.0,
+                                st.1 as f64 / st.0 as f64 / 1e6,
+                                st.2 as f64 / 1e6,
+                                st.3 as f64 / 1e6
+                            );
+                            *st = (0, 0, 0, 0);
                         }
                     }
                 }
@@ -1697,7 +1724,12 @@ impl Dispatch<zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, DmabufParams> 
                 let addr = g.ptr as usize + offset as usize;
                 let len = (stride as usize * height as usize).min(g.len.saturating_sub(offset as usize));
                 match gpa_ranges(&mut st.pagemap, addr, len) {
-                    Ok(ranges) => st.link.send(&ToHost::BufferNew { id: host_id, width: width as u32, height: height as u32, stride, format: fmt, ranges }),
+                    Ok(ranges) => {
+                        st.link.send(&ToHost::BufferNew { id: host_id, width: width as u32, height: height as u32, stride, format: fmt, ranges });
+                        if st.present_host {
+                            st.link.send(&ToHost::BufferGpu { id: host_id, resource: g.res });
+                        }
+                    }
                     Err(e) => logf!("gpu buffer {host_id}: no guest-physical pages: {e}"),
                 }
                 st.buffers.insert(
@@ -1755,6 +1787,11 @@ pub fn run(link: HostLink, inbox: Arc<Inbox>, socket: &str, out: OutputCfg) -> s
         dh.create_global::<State, zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, ()>(3, ());
         logf!("virtio-gpu present: dma-buf buffers enabled");
     }
+    let present_host = drm.is_some()
+        && std::fs::read_to_string("/proc/cmdline").is_ok_and(|c| c.split_whitespace().any(|w| w == "airdroid.present=host"));
+    if present_host {
+        logf!("the host reads GPU buffers itself");
+    }
 
     let _ = std::fs::remove_file(socket);
     let listener = ListeningSocket::bind_absolute(socket.into()).map_err(|e| std::io::Error::other(format!("bind {socket}: {e}")))?;
@@ -1764,6 +1801,8 @@ pub fn run(link: HostLink, inbox: Arc<Inbox>, socket: &str, out: OutputCfg) -> s
         link,
         drm,
         readback: Vec::new(),
+        readback_stats: (0, 0, 0, 0),
+        present_host,
         out,
         pagemap: std::fs::File::open("/proc/self/pagemap")?,
         surfaces: HashMap::new(),

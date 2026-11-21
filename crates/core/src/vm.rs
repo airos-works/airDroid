@@ -89,6 +89,10 @@ pub struct VmConfig {
     /// A host folder Android sees as /sdcard/airOS (virtio-9p, tag
     /// "airdroid_share").
     pub share: Option<PathBuf>,
+    /// The host app reads GPU frames through QEMU (`present_socket`):
+    /// only for a host that does (the air/OS app), as the guest then no
+    /// longer copies them into its RAM.
+    pub host_present: bool,
 }
 
 impl VmConfig {
@@ -97,6 +101,17 @@ impl VmConfig {
     /// first directory where binding one works.
     pub fn socket(&self) -> PathBuf {
         socket_dir(&self.state_dir).join("airdroid.sock")
+    }
+    /// QEMU's socket for reading GPU frames straight into the app's window
+    /// bitmaps (qemu/patches/0103): on air/OS with gpu=virgl and
+    /// `host_present`, unless AIRDROID_PRESENT=guest (the guest copies
+    /// frames into its RAM first).
+    pub fn present_socket(&self) -> Option<PathBuf> {
+        let on = cfg!(target_os = "haiku")
+            && self.host_present
+            && self.gpu == "virgl"
+            && std::env::var("AIRDROID_PRESENT").map_or(true, |v| v != "guest");
+        on.then(|| socket_dir(&self.state_dir).join("present.sock"))
     }
     pub fn console_log(&self) -> PathBuf {
         self.state_dir.join("console.log")
@@ -117,7 +132,7 @@ impl VmConfig {
             self.dpi,
             if self.multi_windows { 1 } else { 0 },
             self.gpu
-        );
+        ) + if self.present_socket().is_some() { " airdroid.present=host" } else { "" };
         let mut a: Vec<String> = Vec::new();
         let mut push = |v: &[&str]| a.extend(v.iter().map(|s| s.to_string()));
         if let Some(fw) = &self.firmware {
@@ -189,6 +204,10 @@ impl VmConfig {
         let mut cmd = Command::new(&self.qemu);
         for (k, v) in &self.env {
             cmd.env(k, v);
+        }
+        if let Some(s) = self.present_socket() {
+            let _ = std::fs::remove_file(&s);
+            cmd.env("AIRDROID_PRESENT_SOCKET", s);
         }
         if let RamBackend::NvmmMap(map) = &self.ram {
             let _ = std::fs::remove_file(map);

@@ -207,8 +207,8 @@ public:
 	~AndroidView()
 	{
 		delete fBitmap;
-		delete fFrames[0];
-		delete fFrames[1];
+		for (int i = 0; i < 2; i++)
+			_DeleteFrame(i);
 	}
 
 	/*!	Double-buffered frames: the back bitmap of \a width x \a height
@@ -216,19 +216,35 @@ public:
 		window locked, then EndFrame() makes it the front one. BeginFrame()
 		syncs with app_server first, so it is done with a bitmap before we
 		write into it again. Called with the window locked. */
-	uint32* BeginFrame(int32 width, int32 height)
+	uint32* BeginFrame(int32 width, int32 height, area_id* _area)
 	{
 		for (int i = 0; i < 2; i++) {
 			if (fFrames[i] == NULL
 				|| fFrames[i]->Bounds().IntegerWidth() + 1 != width
 				|| fFrames[i]->Bounds().IntegerHeight() + 1 != height) {
-				delete fFrames[i];
-				fFrames[i] = new BBitmap(BRect(0, 0, width - 1, height - 1), 0,
-					B_RGB32);
+				_DeleteFrame(i);
+				BRect bounds(0, 0, width - 1, height - 1);
+				// in an area of our own that QEMU may clone, so it can read
+				// GPU frames straight into it; app_server clones it too
+				size_t size = ((size_t)width * 4 * height + B_PAGE_SIZE - 1)
+					& ~(size_t)(B_PAGE_SIZE - 1);
+				void* address = NULL;
+				fAreas[i] = create_area("airDroid frame", &address,
+					B_ANY_ADDRESS, size, B_NO_LOCK,
+					B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA);
+				if (fAreas[i] >= B_OK) {
+					fFrames[i] = new BBitmap(fAreas[i], 0, bounds, 0, B_RGB32,
+						width * 4);
+					if (fFrames[i]->InitCheck() != B_OK) {
+						_DeleteFrame(i);
+					}
+				}
+				if (fFrames[i] == NULL) {
+					fFrames[i] = new BBitmap(bounds, 0, B_RGB32);
+				}
 				if (fFrames[i]->InitCheck() != B_OK
 					|| fFrames[i]->BytesPerRow() != width * 4) {
-					delete fFrames[i];
-					fFrames[i] = NULL;
+					_DeleteFrame(i);
 					return NULL;
 				}
 			}
@@ -240,7 +256,17 @@ public:
 		// returns. (Not from Draw(): inside an update app_server answers it
 		// only after the update, which waits for Draw().)
 		Sync();
+		*_area = fAreas[1 - fFront];
 		return (uint32*)fFrames[1 - fFront]->Bits();
+	}
+
+	void _DeleteFrame(int i)
+	{
+		delete fFrames[i];
+		fFrames[i] = NULL;
+		if (fAreas[i] >= B_OK)
+			delete_area(fAreas[i]);
+		fAreas[i] = -1;
 	}
 
 	void EndFrame()
@@ -490,6 +516,7 @@ private:
 	uint32		fId;
 	BBitmap*	fBitmap;
 	BBitmap*	fFrames[2] = { NULL, NULL };
+	area_id		fAreas[2] = { -1, -1 };
 	int			fFront;
 	bool		fCursorHidden;
 	bool		fBorderless;
@@ -1353,14 +1380,16 @@ ad_window_move(uint32 id, int32 x, int32 y)
 
 
 /*! The back bitmap of window \a id for a \a width x \a height frame
-	(packed B_RGB32 rows), or NULL; ad_window_frame_end() shows it. */
+	(packed B_RGB32 rows), or NULL; ad_window_frame_end() shows it.
+	\a _area: the cloneable area the rows start at, or -1. */
 uint32*
-ad_window_frame_begin(uint32 id, int32 width, int32 height)
+ad_window_frame_begin(uint32 id, int32 width, int32 height, int32* _area)
 {
+	*_area = -1;
 	AndroidWindow* w = LockWindow(id);
 	if (w == NULL)
 		return NULL;
-	uint32* bits = w->View()->BeginFrame(width, height);
+	uint32* bits = w->View()->BeginFrame(width, height, _area);
 	w->Unlock();
 	return bits;
 }

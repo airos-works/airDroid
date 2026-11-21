@@ -97,6 +97,8 @@ fn main() {
         gpu: arg(&args, "--gpu").unwrap_or_else(|| "none".into()),
         env: Vec::new(),
         share: arg(&args, "--share").map(PathBuf::from),
+        // reads frames from guest RAM
+        host_present: false,
     };
     eprintln!("dev: qemu {}", cfg.args().join(" "));
     let mut child = cfg.spawn().expect("start qemu");
@@ -145,6 +147,7 @@ fn main() {
                 }
                 ToHost::Status { stage, detail } => eprintln!("dev: [{:6.1}s] status {stage:?}: {detail}", start.elapsed().as_secs_f32()),
                 ToHost::Log { text } => eprintln!("dev: [{:6.1}s] guest: {text}", start.elapsed().as_secs_f32()),
+                ToHost::BufferGpu { .. } => {} // only with airdroid.present=host (air/OS)
                 ToHost::BufferNew { id, width, height, stride, format, ranges } => {
                     let Some(mem) = mem.as_ref() else { continue };
                     let b = Buffer::new(mem, width, height, stride, format, &ranges);

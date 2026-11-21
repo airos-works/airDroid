@@ -4,6 +4,7 @@
 use crate::host::{self, action, kind, Event};
 use crate::keys;
 use crate::paths::{Paths, Resources};
+use crate::present::{self, Present};
 use crate::settings::Settings;
 use airdroid_core::compose::{content_bounds, opaque_bounds, Buffer, Canvas};
 use airdroid_core::proto::Rect;
@@ -87,6 +88,8 @@ pub struct Engine {
     session: Option<Session>,
     mem: Option<Arc<GuestMem>>,
     buffers: HashMap<u32, Buffer>,
+    /// QEMU reads GPU frames for us (gpu=virgl on air/OS)
+    present: Option<Present>,
     windows: HashMap<u32, Win>,
     pending: Vec<Pending>,
     frames_done: Vec<(u32, u32)>,
@@ -131,6 +134,7 @@ impl Engine {
             session: None,
             mem: None,
             buffers: HashMap::new(),
+            present: None,
             windows: HashMap::new(),
             pending: Vec::new(),
             frames_done: Vec::new(),
@@ -466,6 +470,7 @@ impl Engine {
             gpu,
             env,
             share,
+            host_present: true,
         };
         if cfg.accel == Accel::Tcg {
             self.status("Starting Android (no hardware virtualization: this will be slow)…");
@@ -501,6 +506,7 @@ impl Engine {
         self.child = Some(child);
         self.qemu_alive = true;
         self.session = Some(session);
+        self.present = cfg.present_socket().map(Present::new);
         self.vm = Some(cfg);
         self.phase = Phase::Starting;
         self.epoch = Instant::now();
@@ -687,6 +693,11 @@ impl Engine {
                     eprintln!("airDroid: buffer {id} before guest RAM was mapped");
                 }
             }
+            ToHost::BufferGpu { id, resource } => {
+                if let Some(b) = self.buffers.get_mut(&id) {
+                    b.resource = resource;
+                }
+            }
             ToHost::BufferDestroy { id } => {
                 self.buffers.remove(&id);
             }
@@ -766,10 +777,28 @@ impl Engine {
                         let (aw, ah) = (area.w as u32, area.h as u32);
                         let canvas = &mut w.canvas;
                         let buffers = &self.buffers;
-                        let shown = host::window_frame(window, aw, ah, |out| {
+                        let mut gpu = self.present.as_mut();
+                        let direct = gpu.as_ref().and_then(|_| present::direct(&layers, buffers, area));
+                        let shown = host::window_frame(window, aw, ah, |out, frame_area| {
+                            // one GPU layer: QEMU reads it into the bitmap
+                            if let (Some(p), Some(d)) = (gpu.as_deref_mut(), direct) {
+                                if frame_area >= 0 {
+                                    match p.read_direct(d, frame_area, aw, ah) {
+                                        Ok(()) => return,
+                                        Err(e) if debug() => eprintln!("airDroid: {e}"),
+                                        Err(_) => {}
+                                    }
+                                }
+                            }
+                            if let Some(p) = gpu.as_deref_mut() {
+                                p.read_backings(&layers, buffers, area);
+                            }
                             canvas.compose_into(out, aw, ah, &layers, buffers, area.x, area.y);
                         });
                         if !shown {
+                            if let Some(p) = self.present.as_mut() {
+                                p.read_backings(&layers, &self.buffers, area);
+                            }
                             w.canvas.resize(aw, ah);
                             w.canvas.compose_at(&layers, &self.buffers, area.x, area.y);
                             host::window_present(window, &w.canvas.pixels, aw, ah);
@@ -1146,7 +1175,7 @@ struct Mic {
     got_data: bool,
 }
 
-fn debug() -> bool {
+pub(crate) fn debug() -> bool {
     static D: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *D.get_or_init(|| std::env::var("AIRDROID_DEBUG").is_ok())
 }
