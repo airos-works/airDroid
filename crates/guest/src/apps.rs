@@ -93,6 +93,32 @@ pub fn follow_timezone(tz: &str) {
     }
 }
 
+/// Android stays provisioned. Its settings files can come back empty when
+/// the host goes down while they are being written (a power cut; Android
+/// then starts them afresh), and Waydroid's image provisions the device on
+/// its first boot only: without `device_provisioned` Settings exits at
+/// once and Home and notifications are off. A marker on the data disk says
+/// that this Android was provisioned before.
+pub fn stay_provisioned() {
+    let marker = format!("{}/provisioned", crate::container::DATA_DISK);
+    let get = |ns: &str, key: &str| shell_user(&["/system/bin/settings", "get", ns, key]).map(|v| v.trim().to_string()).unwrap_or_default();
+    let global = get("global", "device_provisioned");
+    let secure = get("secure", "user_setup_complete");
+    if global == "1" && secure == "1" {
+        if !std::path::Path::new(&marker).exists() {
+            let _ = std::fs::write(&marker, "");
+        }
+        return;
+    }
+    if !std::path::Path::new(&marker).exists() || global.is_empty() {
+        // the first boot (Android provisions itself), or no answer
+        return;
+    }
+    logf!("Android lost its settings (device_provisioned {global}, user_setup_complete {secure}): provisioning it again");
+    let _ = shell_user(&["/system/bin/settings", "put", "global", "device_provisioned", "1"]);
+    let _ = shell_user(&["/system/bin/settings", "put", "secure", "user_setup_complete", "1"]);
+}
+
 /// The host's shared folder (virtio-9p "airdroid_share"), as /sdcard/airOS:
 /// mounted in Android's own mount namespace over /data/media/0/airOS, the
 /// storage behind /sdcard, so every app's view of it shows the files.

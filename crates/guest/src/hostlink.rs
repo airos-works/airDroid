@@ -3,8 +3,7 @@
 use airdroid_proto::{self as proto, ToHost};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::os::fd::AsRawFd;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 
 /// Finds the port's /dev node by its name (no udev in the VM).
 pub fn find_port(name: &str) -> Option<String> {
@@ -17,9 +16,15 @@ pub fn find_port(name: &str) -> Option<String> {
     None
 }
 
+/// Messages go out through a writer thread: a write to the port waits
+/// (in the kernel, spinning) until QEMU has taken it, and QEMU can be busy
+/// for seconds (a shader compile in virglrenderer). The compositor must
+/// not wait with it: Android's hardware composer aborts when its Wayland
+/// requests are not read for about a second.
 #[derive(Clone)]
 pub struct HostLink {
-    writer: Arc<Mutex<File>>,
+    tx: mpsc::Sender<Vec<u8>>,
+    pending: Arc<(Mutex<usize>, Condvar)>,
 }
 
 static LINK: OnceLock<HostLink> = OnceLock::new();
@@ -29,25 +34,46 @@ impl HostLink {
     pub fn open() -> io::Result<(HostLink, File)> {
         let path = find_port(proto::PORT_NAME)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no airDroid virtio-serial port"))?;
-        let f = OpenOptions::new().read(true).write(true).open(&path)?;
+        let mut f = OpenOptions::new().read(true).write(true).open(&path)?;
         let reader = f.try_clone()?;
-        let link = HostLink { writer: Arc::new(Mutex::new(f)) };
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let pending = Arc::new((Mutex::new(0usize), Condvar::new()));
+        let done = pending.clone();
+        std::thread::Builder::new().name("host-tx".into()).spawn(move || {
+            for buf in rx {
+                // virtio-serial blocks while the host side is not connected;
+                // that is the behaviour we want (the host is the only
+                // consumer), and the order of the messages is kept.
+                if let Err(e) = f.write_all(&buf) {
+                    console(&format!("airdroid: host link write: {e}"));
+                }
+                *done.0.lock().unwrap() -= 1;
+                done.1.notify_all();
+            }
+        })?;
+        let link = HostLink { tx, pending };
         let _ = LINK.set(link.clone());
         Ok((link, reader))
     }
 
     pub fn send(&self, msg: &ToHost) {
-        let buf = proto::encode(msg);
-        let mut w = self.writer.lock().unwrap();
-        // virtio-serial blocks while the host side is not connected; that is
-        // the behaviour we want (the host is the only consumer).
-        if let Err(e) = w.write_all(&buf) {
-            console(&format!("airdroid: host link write: {e}"));
+        *self.pending.0.lock().unwrap() += 1;
+        if self.tx.send(proto::encode(msg)).is_err() {
+            *self.pending.0.lock().unwrap() -= 1;
         }
     }
 
-    pub fn raw_fd(&self) -> i32 {
-        self.writer.lock().unwrap().as_raw_fd()
+    /// Waits (at most `timeout`) until everything sent so far is written.
+    pub fn flush(&self, timeout: std::time::Duration) {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut n = self.pending.0.lock().unwrap();
+        while *n > 0 {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            n = self.pending.1.wait_timeout(n, left).unwrap().0;
+        }
     }
 }
 

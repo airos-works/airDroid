@@ -887,7 +887,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  #include "virglrenderer.h"
  #include "virtgpu_drm.h"
  
-@@ -344,6 +346,95 @@
+@@ -344,6 +346,96 @@
     }
  }
  
@@ -933,6 +933,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 +      res->shadow_stride = stride;
 +      res->shadow_bpp = info.stride / info.width;
 +      res->shadow_fd = fd;
++      virgl_resource_shadow_added(res);
 +   }
 +
 +   *out_size = virgl_shm_size(res->shadow_fd);
@@ -983,7 +984,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  int virgl_renderer_transfer_read_iov(uint32_t handle, uint32_t ctx_id,
                                       uint32_t level, uint32_t stride,
                                       uint32_t layer_stride,
-@@ -358,6 +449,9 @@
+@@ -358,6 +450,9 @@
     if (!res)
        return EINVAL;
  
@@ -993,7 +994,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
     transfer_info.level = level;
     transfer_info.stride = stride;
     transfer_info.layer_stride = layer_stride;
-@@ -1248,7 +1342,7 @@
+@@ -1248,7 +1343,7 @@
        switch (export_fd_type) {
        case VIRGL_RESOURCE_FD_DMABUF:
        case VIRGL_RESOURCE_FD_SHM:
@@ -1002,7 +1003,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
           map_size = res->map_size;
           break;
        case VIRGL_RESOURCE_FD_OPAQUE:
-@@ -1290,7 +1384,7 @@
+@@ -1290,7 +1385,7 @@
        case VIRGL_RESOURCE_FD_DMABUF:
        case VIRGL_RESOURCE_FD_SHM:
        case VIRGL_RESOURCE_OPAQUE_HANDLE:
@@ -1021,11 +1022,53 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  
  #include <assert.h>
  #include <errno.h>
-@@ -49,6 +50,10 @@
+@@ -39,6 +40,40 @@
+ static struct util_hash_table *virgl_resource_table;
+ static struct virgl_resource_pipe_callbacks pipe_callbacks;
+ 
++/* the resources that have a shadow: a few (window buffers of Vulkan apps) */
++#define VIRGL_SHADOWED_MAX 256
++static struct virgl_resource *virgl_shadowed[VIRGL_SHADOWED_MAX];
++int virgl_resource_shadow_count;
++
++void
++virgl_resource_shadow_added(struct virgl_resource *res)
++{
++   /* beyond the table, GL users of the resource see what it held before */
++   if (virgl_resource_shadow_count < VIRGL_SHADOWED_MAX)
++      virgl_shadowed[virgl_resource_shadow_count++] = res;
++}
++
++static void
++virgl_resource_shadow_removed(struct virgl_resource *res)
++{
++   for (int i = 0; i < virgl_resource_shadow_count; i++) {
++      if (virgl_shadowed[i] == res) {
++         virgl_shadowed[i] = virgl_shadowed[--virgl_resource_shadow_count];
++         return;
++      }
++   }
++}
++
++const struct virgl_resource *
++virgl_resource_shadow_of(const struct pipe_resource *pres)
++{
++   for (int i = 0; i < virgl_resource_shadow_count; i++) {
++      if (virgl_shadowed[i]->pipe_resource == pres)
++         return virgl_shadowed[i];
++   }
++   return NULL;
++}
++
+ static void
+ virgl_resource_destroy_func(void *val)
+ {
+@@ -49,6 +84,11 @@
     if ((res->fd_type != VIRGL_RESOURCE_FD_INVALID) &&
         (res->fd_type != VIRGL_RESOURCE_OPAQUE_HANDLE))
        close(res->fd);
 +   if (res->shadow_ptr) {
++      virgl_resource_shadow_removed(res);
 +      virgl_shm_unmap(res->shadow_ptr, res->shadow_size);
 +      close(res->shadow_fd);
 +   }
@@ -1034,7 +1077,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  }
 --- a/src/virgl_resource.h
 +++ b/src/virgl_resource.h
-@@ -104,8 +104,27 @@
+@@ -104,8 +104,40 @@
     struct virgl_resource_vulkan_info vulkan_info;
  
     void *private_data;
@@ -1058,6 +1101,19 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 + */
 +int
 +virgl_resource_get_shadow_fd(struct virgl_resource *res, uint64_t *out_size);
++
++/* Resources that have a shadow now (GL has nothing to do while it is 0). */
++extern int virgl_resource_shadow_count;
++
++/* A resource got its shadow. */
++void
++virgl_resource_shadow_added(struct virgl_resource *res);
++
++/* The resource of pres if it has a shadow, else NULL: what GL samples from
++ * pres is then older than what the other renderer drew.
++ */
++const struct virgl_resource *
++virgl_resource_shadow_of(const struct pipe_resource *pres);
 +
  struct virgl_resource_pipe_callbacks {
     void *data;
@@ -1264,3 +1320,93 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 +#endif /* !__HAIKU__ */
 +
 +#endif /* VIRGL_SHM_H */
+--- a/src/vrend/vrend_renderer.c
++++ b/src/vrend/vrend_renderer.c
+@@ -5885,6 +5885,57 @@
+    ctx->sub->prog = prev_prog;
+ }
+ 
++static int vrend_renderer_transfer_internal(struct vrend_context *ctx,
++                                            struct vrend_resource *res,
++                                            const struct vrend_transfer_info *info,
++                                            int transfer_mode);
++
++/* A texture whose resource has a shadow (virgl_resource.h) is drawn by
++ * another renderer (Venus), into the shadow: what GL is about to read from
++ * it comes from there first. Returns whether the texture was written.
++ */
++static bool vrend_sync_shadow(struct vrend_context *ctx, struct vrend_resource *res)
++{
++   const struct virgl_resource *vres = virgl_resource_shadow_of(&res->base);
++   if (!vres)
++      return false;
++
++   struct pipe_box box = {
++      .width = res->base.width0,
++      .height = res->base.height0,
++      .depth = 1,
++   };
++   struct iovec iov = { .iov_base = vres->shadow_ptr, .iov_len = vres->shadow_size };
++   const struct vrend_transfer_info info = {
++      .stride = vres->shadow_stride,
++      .box = &box,
++      .iovec = &iov,
++      .iovec_cnt = 1,
++   };
++   if (vrend_renderer_transfer_internal(ctx, res, &info, VIRGL_TRANSFER_TO_HOST))
++      return false;
++
++   /* the upload bound its texture: the next draw binds its own again */
++   for (int type = 0; type < PIPE_SHADER_TYPES; type++)
++      ctx->sub->views[type].dirty_mask = ~0;
++   return true;
++}
++
++/* The same for every texture the context's shaders can sample. */
++static void vrend_sync_shadowed_views(struct vrend_context *ctx)
++{
++   struct vrend_sub_context *sub_ctx = ctx->sub;
++
++   for (int type = 0; type < PIPE_SHADER_TYPES; type++) {
++      struct vrend_shader_view *shader_view = &sub_ctx->views[type];
++      for (int i = 0; i < shader_view->max_num_views; i++) {
++         struct vrend_sampler_view *view = shader_view->views[i];
++         if (view && view->texture)
++            vrend_sync_shadow(ctx, view->texture);
++      }
++   }
++}
++
+ int vrend_draw_vbo(struct vrend_context *ctx,
+                    const struct pipe_draw_info *info,
+                    uint32_t cso, uint32_t indirect_handle,
+@@ -5932,6 +5983,9 @@
+    if (ctx->ctx_switch_pending)
+       vrend_finish_context_switch(ctx);
+ 
++   if (virgl_resource_shadow_count)
++      vrend_sync_shadowed_views(ctx);
++
+    vrend_update_frontface_state(sub_ctx);
+    if (ctx->sub->stencil_state_dirty)
+       vrend_update_stencil_state(sub_ctx);
+@@ -10632,6 +10686,9 @@
+       return;
+    }
+ 
++   if (virgl_resource_shadow_count)
++      vrend_sync_shadow(ctx, src_res);
++
+    if (!resource_contains_box(src_res, src_box, src_level)) {
+       vrend_report_context_error(ctx, VIRGL_ERROR_CTX_ILLEGAL_CMD_BUFFER, src_handle);
+       return;
+@@ -11166,6 +11223,9 @@
+    if (ctx->in_error)
+       return;
+ 
++   if (virgl_resource_shadow_count)
++      vrend_sync_shadow(ctx, src_res);
++
+    if (unlikely(info->src.format >= VIRGL_FORMAT_MAX ||
+                 tex_conv_table[info->src.format].format == VIRGL_FORMAT_NONE)) {
+       vrend_report_context_error(ctx, VIRGL_ERROR_CTX_ILLEGAL_FORMAT, info->src.format);
