@@ -1,3 +1,22 @@
+--- a/hw/display/virtio-gpu-virgl.c
++++ b/hw/display/virtio-gpu-virgl.c
+@@ -1331,6 +1331,16 @@
+     }
+ #endif
+ 
++#ifdef __HAIKU__
++    /*
++     * airDroid: with blob resources on (Venus), vrend would also offer the
++     * guest's GL persistently mapped buffers, which map the host GL
++     * driver's own memory into the guest; NVMM on air/OS only takes fully
++     * locked areas (what the Venus renderer shares).
++     */
++    flags |= VIRGL_RENDERER_USE_EXTERNAL_BLOB;
++#endif
++
+     ret = virgl_renderer_init(g, flags, &virtio_gpu_3d_cbs);
+     if (ret != 0) {
+         error_report("virgl could not be initialized: %d", ret);
 --- a/target/i386/nvmm/nvmm-all.c
 +++ b/target/i386/nvmm/nvmm-all.c
 @@ -16,6 +16,8 @@
@@ -9,7 +28,7 @@
  #include "system/runstate.h"
  #include "qemu/main-loop.h"
  #include "qemu/error-report.h"
-@@ -1083,6 +1085,19 @@
+@@ -1083,6 +1085,42 @@
  
  /* -------------------------------------------------------------------------- */
  
@@ -24,12 +43,35 @@
 +    return nvmm_haiku_existing != NULL
 +        && g_hash_table_contains(nvmm_haiku_existing, (void *)hva);
 +}
++
++/* handed-in memory NVMM would not take: host address -> size */
++static GHashTable *nvmm_haiku_refused;
++
++/* Whether hva lies in memory that could not be registered: the guest does
++   not get it at all (it must not get other memory in its place). */
++static bool
++nvmm_haiku_is_refused(uintptr_t hva)
++{
++    GHashTableIter iter;
++    gpointer host, size;
++
++    if (nvmm_haiku_refused == NULL) {
++        return false;
++    }
++    g_hash_table_iter_init(&iter, nvmm_haiku_refused);
++    while (g_hash_table_iter_next(&iter, &host, &size)) {
++        if (hva >= (uintptr_t)host && hva - (uintptr_t)host < (size_t)size) {
++            return true;
++        }
++    }
++    return false;
++}
 +#endif
 +
  static void
  nvmm_update_mapping(hwaddr start_pa, ram_addr_t size, uintptr_t hva,
      bool add, bool rom, const char *name)
-@@ -1097,13 +1112,13 @@
+@@ -1097,13 +1135,13 @@
          }
          ret = nvmm_gpa_map(mach, hva, start_pa, size, prot);
  #ifdef __HAIKU__
@@ -45,7 +87,20 @@
              nvmm_haiku_log_mapping(start_pa, size, hva, false);
          }
  #endif
-@@ -1199,6 +1214,65 @@
+@@ -1147,6 +1185,12 @@
+     hva = (uintptr_t)memory_region_get_ram_ptr(mr) +
+         section->offset_within_region + delta;
+ 
++#ifdef __HAIKU__
++    if (nvmm_haiku_is_refused(hva)) {
++        return;
++    }
++#endif
++
+     nvmm_update_mapping(start_pa, size, hva, add,
+         memory_region_is_rom(mr), mr->name);
+ }
+@@ -1199,6 +1243,74 @@
      .priority = MEMORY_LISTENER_PRIORITY_ACCEL,
  };
  
@@ -60,6 +115,8 @@
 +extern int nvmm_hva_map_existing(struct nvmm_machine *, uintptr_t, size_t)
 +    __attribute__((weak));
 +
++/* Whether host is such memory (then NVMM has it, or the guest goes
++   without: nvmm_hva_map() must not replace it). */
 +static bool
 +nvmm_haiku_map_existing(struct nvmm_machine *mach, void *host, size_t size)
 +{
@@ -77,10 +134,14 @@
 +    if (nvmm_hva_map_existing == NULL
 +        || nvmm_hva_map_existing(mach, (uintptr_t)host, size) == -1) {
 +        warn_report("NVMM: cannot share HostVA:%p Size:%p with the guest "
-+            "as it is (%s); it gets new memory", host, (void *)size,
++            "(%s); the guest does not get it", host, (void *)size,
 +            nvmm_hva_map_existing == NULL ? "this air/OS is too old"
-+                : strerror(errno));
-+        return false;
++                : "not a fully locked area, see the syslog");
++        if (nvmm_haiku_refused == NULL) {
++            nvmm_haiku_refused = g_hash_table_new(NULL, NULL);
++        }
++        g_hash_table_insert(nvmm_haiku_refused, host, (gpointer)size);
++        return true;
 +    }
 +    if (nvmm_haiku_existing == NULL) {
 +        nvmm_haiku_existing = g_hash_table_new(NULL, NULL);
@@ -95,6 +156,9 @@
 +{
 +    gpointer mapped;
 +
++    if (nvmm_haiku_refused != NULL) {
++        g_hash_table_remove(nvmm_haiku_refused, host);
++    }
 +    if (nvmm_haiku_existing != NULL
 +        && g_hash_table_lookup_extended(nvmm_haiku_existing, host, NULL,
 +            &mapped)) {
@@ -111,7 +175,7 @@
  static void
  nvmm_ram_block_added(RAMBlockNotifier *n, void *host, size_t size,
                       size_t max_size)
-@@ -1207,6 +1281,11 @@
+@@ -1207,6 +1319,11 @@
      uintptr_t hva = (uintptr_t)host;
      int ret;
  
@@ -123,7 +187,7 @@
      ret = nvmm_hva_map(mach, hva, max_size);
  #ifdef __HAIKU__
      if (ret == 0) {
-@@ -1227,6 +1306,9 @@
+@@ -1227,6 +1344,9 @@
  }
  
  static struct RAMBlockNotifier nvmm_ram_notifier = {

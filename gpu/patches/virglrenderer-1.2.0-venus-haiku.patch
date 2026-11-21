@@ -63,6 +63,7 @@
  }
  
  bool
+Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format_parse.cpython-314.pyc and new/src/gallium/auxiliary/util/__pycache__/u_format_parse.cpython-314.pyc differ
 --- a/src/proxy/proxy_context.c
 +++ b/src/proxy/proxy_context.c
 @@ -3,6 +3,7 @@
@@ -73,7 +74,19 @@
  #include "proxy_context.h"
  
  #include <fcntl.h>
-@@ -521,7 +522,7 @@
+@@ -310,8 +311,9 @@
+    }
+ #endif
+ 
+-   const uint64_t size = lseek(fd, 0, SEEK_END);
+-   if (size != expected_size) {
++   /* (rounded up to pages where shared memory is an area) */
++   const uint64_t size = virgl_shm_size(fd);
++   if (size < expected_size || size - expected_size >= 4096) {
+       proxy_log("failed to validate shm size(%" PRIu64 ") expected(%" PRIu64 ")", size,
+                 expected_size);
+       return false;
+@@ -521,7 +523,7 @@
     }
  
     if (ctx->shmem.ptr)
@@ -82,7 +95,7 @@
     if (ctx->shmem.fd >= 0)
        close(ctx->shmem.fd);
  
-@@ -613,27 +614,19 @@
+@@ -613,27 +615,19 @@
  static int
  alloc_memfd(const char *name, size_t size, void **out_ptr)
  {
@@ -451,7 +464,7 @@
           ret = vkr_allocator_resource_unmap(res);
 --- a/src/virgl_shm.h
 +++ b/src/virgl_shm.h
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,170 @@
 +/*
 + * Copyright 2026 the airDroid project
 + * SPDX-License-Identifier: MIT
@@ -560,6 +573,17 @@
 +   return addr;
 +}
 +
++/* How much memory fd names (a multiple of the page size here). */
++static inline uint64_t
++virgl_shm_size(int fd)
++{
++   struct virgl_shm_file file;
++   if (pread(fd, &file, sizeof(file), 0) == (ssize_t)sizeof(file) &&
++       file.magic == VIRGL_SHM_MAGIC)
++      return file.size;
++   return lseek(fd, 0, SEEK_END);
++}
++
 +/* Unmaps what virgl_shm_create() or virgl_shm_map() mapped at ptr. */
 +static inline int
 +virgl_shm_unmap(void *ptr, size_t size)
@@ -594,6 +618,12 @@
 +virgl_shm_map(int fd, size_t size)
 +{
 +   return mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++}
++
++static inline uint64_t
++virgl_shm_size(int fd)
++{
++   return lseek(fd, 0, SEEK_END);
 +}
 +
 +static inline int
