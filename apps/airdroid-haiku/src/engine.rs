@@ -442,8 +442,20 @@ impl Engine {
         // GPU: virgl when QEMU has it and a Mesa with EGL can drive a GPU
         let qemu_gl = res.qemu.parent().map(|d| d.join("lib/libvirglrenderer.so.1").exists()).unwrap_or(false);
         let gl = if qemu_gl { crate::paths::gl_environment() } else { None };
-        // Venus (Vulkan) needs virglrenderer's render server next to QEMU
-        let venus = res.qemu.parent().map(|d| d.join("virgl_render_server").exists()).unwrap_or(false);
+        // Venus (Vulkan) needs virglrenderer's render server next to QEMU,
+        // and a Vulkan driver that can carry Android's window buffers
+        let venus = self.settings.gpu == "venus"
+            && gl.is_some()
+            && res.qemu.parent().map(|d| d.join("virgl_render_server")).is_some_and(|server| {
+                server.exists()
+                    && match airdroid_core::vm::venus_check(&server) {
+                        Ok(()) => true,
+                        Err(why) => {
+                            eprintln!("airDroid: Vulkan on the GPU is off, Android apps get lavapipe ({why})");
+                            false
+                        }
+                    }
+            });
         let (gpu, env) = match (self.settings.gpu.as_str(), gl) {
             ("none", _) | (_, None) => ("none".to_string(), Vec::new()),
             ("virgl", Some((env, _))) => ("virgl".to_string(), env),
