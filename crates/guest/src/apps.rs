@@ -82,6 +82,17 @@ pub fn prepare_desktop() {
     wake();
 }
 
+/// Android follows the host's time zone (`tz`, an Olson ID; empty: leave it).
+pub fn follow_timezone(tz: &str) {
+    if tz.is_empty() || exec::getprop("persist.sys.timezone") == tz {
+        return;
+    }
+    match shell_user(&["/system/bin/cmd", "alarm", "set-timezone", tz]) {
+        Ok(_) => logf!("time zone: {tz}"),
+        Err(e) => logf!("time zone {tz}: {e}"),
+    }
+}
+
 /// The host's shared folder (virtio-9p "airdroid_share"), as /sdcard/airOS:
 /// mounted in Android's own mount namespace over /data/media/0/airOS, the
 /// storage behind /sdcard, so every app's view of it shows the files.

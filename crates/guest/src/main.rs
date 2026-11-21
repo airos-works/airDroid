@@ -293,6 +293,7 @@ fn boot(link: &HostLink, cfg: &container::Config, inbox: &Arc<compositor::Inbox>
     {
         let link = link.clone();
         let multi = cfg.multi_windows;
+        let tz = cfg.tz.clone();
         std::thread::spawn(move || {
             let start = std::time::Instant::now();
             loop {
@@ -304,6 +305,7 @@ fn boot(link: &HostLink, cfg: &container::Config, inbox: &Arc<compositor::Inbox>
                     let _ = multi;
                     status(&link, BootStage::Booted, &format!("Android booted in {:.1} s", start.elapsed().as_secs_f32()));
                     apps::prepare_desktop();
+                    apps::follow_timezone(&tz);
                     apps::spawn(link.clone(), 0, apps::Action::List);
                     apps::watch_packages(link.clone());
                     return;

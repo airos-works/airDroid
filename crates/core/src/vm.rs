@@ -93,6 +93,8 @@ pub struct VmConfig {
     /// only for a host that does (the air/OS app), as the guest then no
     /// longer copies them into its RAM.
     pub host_present: bool,
+    /// The host's time zone (an Olson ID) for Android to follow.
+    pub timezone: Option<String>,
 }
 
 impl VmConfig {
@@ -132,7 +134,13 @@ impl VmConfig {
             self.dpi,
             if self.multi_windows { 1 } else { 0 },
             self.gpu
-        ) + if self.present_socket().is_some() { " airdroid.present=host" } else { "" };
+        ) + if self.present_socket().is_some() { " airdroid.present=host" } else { "" }
+            + &self
+                .timezone
+                .as_deref()
+                .filter(|z| !z.is_empty() && z.chars().all(|c| c.is_ascii_alphanumeric() || "/_+-".contains(c)))
+                .map(|z| format!(" airdroid.tz={z}"))
+                .unwrap_or_default();
         let mut a: Vec<String> = Vec::new();
         let mut push = |v: &[&str]| a.extend(v.iter().map(|s| s.to_string()));
         if let Some(fw) = &self.firmware {
@@ -263,4 +271,51 @@ pub fn socket_dir(preferred: &Path) -> PathBuf {
         preferred.to_path_buf()
     })
     .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(timezone: Option<&str>) -> VmConfig {
+        VmConfig {
+            qemu: "qemu".into(),
+            firmware: None,
+            kernel: "k".into(),
+            initrd: "i".into(),
+            system_img: "s".into(),
+            vendor_img: "v".into(),
+            userdata: "u".into(),
+            state_dir: "/tmp/airdroid-test".into(),
+            ram: RamBackend::SharedFile("/tmp/airdroid-test/ram".into()),
+            ram_mb: 2048,
+            cpus: 2,
+            accel: Accel::Tcg,
+            width: 1280,
+            height: 800,
+            dpi: 0,
+            multi_windows: true,
+            gpu: "none".into(),
+            env: Vec::new(),
+            share: None,
+            host_present: false,
+            timezone: timezone.map(str::to_string),
+        }
+    }
+    fn cmdline(c: &VmConfig) -> String {
+        let a = c.args();
+        let i = a.iter().position(|x| x == "-append").unwrap();
+        a[i + 1].clone()
+    }
+
+    #[test]
+    fn time_zone_goes_on_the_command_line() {
+        assert!(cmdline(&config(Some("Australia/Sydney"))).ends_with(" airdroid.tz=Australia/Sydney"));
+        assert!(cmdline(&config(Some("America/Port-au-Prince"))).contains(" airdroid.tz=America/Port-au-Prince"));
+        assert!(cmdline(&config(Some("Etc/GMT+11"))).contains(" airdroid.tz=Etc/GMT+11"));
+        // nothing that could add kernel arguments
+        assert!(!cmdline(&config(Some("UTC init=/bin/sh"))).contains("airdroid.tz"));
+        assert!(!cmdline(&config(Some(""))).contains("airdroid.tz"));
+        assert!(!cmdline(&config(None)).contains("airdroid.tz"));
+    }
 }

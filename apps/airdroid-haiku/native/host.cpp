@@ -27,6 +27,7 @@
 #include <GroupLayoutBuilder.h>
 #include <LayoutBuilder.h>
 #include <ListView.h>
+#include <LocaleRoster.h>
 #include <Menu.h>
 #include <MenuBar.h>
 #include <MediaRecorder.h>
@@ -40,6 +41,7 @@
 #include <NodeInfo.h>
 #include <Notification.h>
 #include <String.h>
+#include <TimeZone.h>
 #include <OS.h>
 #include <Path.h>
 #include <PopUpMenu.h>
@@ -1905,6 +1907,19 @@ ad_find_directory(int32 which, char* buffer, size_t length)
 	if (find_directory((directory_which)which, &path, true) != B_OK)
 		return -1;
 	strlcpy(buffer, path.Path(), length);
+	return 0;
+}
+
+
+/*! The time zone air/OS is set to, as an Olson ID ("Australia/Sydney"). */
+int
+ad_timezone(char* buffer, size_t length)
+{
+	BTimeZone zone;
+	if (BLocaleRoster::Default()->GetDefaultTimeZone(&zone) != B_OK
+		|| zone.ID().IsEmpty())
+		return -1;
+	strlcpy(buffer, zone.ID().String(), length);
 	return 0;
 }
 

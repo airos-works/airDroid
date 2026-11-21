@@ -103,6 +103,7 @@ mod ffi {
         pub fn ad_clipboard_set(text: *const libc::c_char);
         pub fn ad_make_launcher(path: *const libc::c_char, app: *const libc::c_char, package: *const libc::c_char, png: *const u8, len: usize) -> i32;
         pub fn ad_app_path(buf: *mut libc::c_char, len: usize) -> i32;
+        pub fn ad_timezone(buf: *mut libc::c_char, len: usize) -> i32;
         pub fn ad_screen_size(w: *mut i32, h: *mut i32) -> f32;
         pub fn ad_register_types(signature: *const libc::c_char);
         pub fn ad_audio_open(id: u32, rate: u32, channels: u32);
@@ -241,6 +242,16 @@ mod imp {
         let (ptr, len) = png.map_or((std::ptr::null(), 0), |v| (v.as_ptr(), v.len()));
         unsafe { ffi::ad_make_launcher(p.as_ptr(), c(app).as_ptr(), c(package).as_ptr(), ptr, len) == 0 }
     }
+    /// air/OS's time zone, an Olson ID.
+    pub fn timezone() -> Option<String> {
+        let mut buf = vec![0 as libc::c_char; 128];
+        unsafe {
+            if ffi::ad_timezone(buf.as_mut_ptr(), buf.len()) != 0 {
+                return None;
+            }
+            Some(std::ffi::CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned())
+        }
+    }
     pub fn app_path() -> Option<String> {
         let mut buf = vec![0 as libc::c_char; 1024];
         unsafe {
@@ -343,6 +354,12 @@ mod imp {
     pub fn clipboard_set(text: &str) {}
     pub fn make_launcher(path: &std::path::Path, app: &str, package: &str, png: Option<&[u8]>) -> bool {
         false
+    }
+    /// The host's time zone: /etc/localtime's target under zoneinfo/.
+    pub fn timezone() -> Option<String> {
+        let t = std::fs::read_link("/etc/localtime").ok()?;
+        let t = t.to_string_lossy();
+        t.split_once("zoneinfo/").map(|(_, z)| z.to_string())
     }
     pub fn app_path() -> Option<String> {
         std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned())

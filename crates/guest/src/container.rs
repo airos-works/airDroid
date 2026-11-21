@@ -44,11 +44,13 @@ pub struct Config {
     pub multi_windows: bool,
     /// "none" (SwiftShader) or "virgl".
     pub gpu: String,
+    /// The host's time zone (Olson ID), or empty.
+    pub tz: String,
 }
 
 impl Config {
     pub fn from_cmdline(cmdline: &str) -> Config {
-        let mut c = Config { width: 1280, height: 800, dpi: 0, multi_windows: true, gpu: "none".into() };
+        let mut c = Config { width: 1280, height: 800, dpi: 0, multi_windows: true, gpu: "none".into(), tz: String::new() };
         for word in cmdline.split_whitespace() {
             let Some(kv) = word.strip_prefix("airdroid.") else { continue };
             let Some((k, v)) = kv.split_once('=') else { continue };
@@ -58,6 +60,7 @@ impl Config {
                 "dpi" => c.dpi = v.parse().unwrap_or(0),
                 "multiwin" => c.multi_windows = v == "1",
                 "gpu" => c.gpu = v.to_string(),
+                "tz" => c.tz = v.to_string(),
                 _ => {}
             }
         }
@@ -268,6 +271,11 @@ pub fn make_props(cfg: &Config, extra: &[(String, String)]) -> String {
     set("ro.product.waydroid.model", "airDroid");
     if cfg.dpi != 0 {
         set("ro.sf.lcd_density", &cfg.dpi.to_string());
+    }
+    if !cfg.tz.is_empty() {
+        // a new data disk starts in the host's zone (afterwards Android's
+        // saved one wins: apps::follow_timezone)
+        set("persist.sys.timezone", &cfg.tz);
     }
     for (k, v) in extra {
         props.retain(|(pk, _)| pk != k);

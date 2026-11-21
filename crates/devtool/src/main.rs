@@ -99,6 +99,7 @@ fn main() {
         share: arg(&args, "--share").map(PathBuf::from),
         // reads frames from guest RAM
         host_present: false,
+        timezone: None,
     };
     eprintln!("dev: qemu {}", cfg.args().join(" "));
     let mut child = cfg.spawn().expect("start qemu");

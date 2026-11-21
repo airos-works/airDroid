@@ -14,6 +14,8 @@
   (Applications › Android apps), remove.
 * Audio output (PulseAudio protocol in the guest, Media Kit on air/OS).
 * Networking (QEMU user networking; Android sees Ethernet).
+* Time zone: Android follows air/OS's (BTimeZone, `airdroid.tz=` on the
+  guest command line; `cmd alarm set-timezone` after boot).
 * Clipboard both ways (implemented; not yet verified on air/OS).
 * `airdroid` command: status, shell, logcat, app …, prop, stop.
 
