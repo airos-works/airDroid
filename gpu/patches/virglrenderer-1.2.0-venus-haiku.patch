@@ -207,6 +207,20 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  
        ((VkDeviceCreateInfo *)args->pCreateInfo)->ppEnabledExtensionNames = exts;
        ((VkDeviceCreateInfo *)args->pCreateInfo)->enabledExtensionCount = ext_count;
+@@ -166,6 +169,13 @@
+    args->ret = vk->CreateDevice(args->physicalDevice, args->pCreateInfo, NULL,
+                                 &dev->base.handle.device);
+    if (args->ret != VK_SUCCESS) {
++      /* which of what the client asked for the driver does not have is
++       * otherwise anyone's guess
++       */
++      vkr_log("vkCreateDevice failed (%d) with %u extensions:", args->ret,
++              args->pCreateInfo->enabledExtensionCount);
++      for (uint32_t i = 0; i < args->pCreateInfo->enabledExtensionCount; i++)
++         vkr_log("  %s", args->pCreateInfo->ppEnabledExtensionNames[i]);
+       free(exts);
+       free(dev);
+       return;
 --- a/src/venus/vkr_device_memory.c
 +++ b/src/venus/vkr_device_memory.c
 @@ -4,6 +4,7 @@
