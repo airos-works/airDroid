@@ -103,6 +103,24 @@ does not mark opaque 6.7 -> 1.7 ms. Android's own
 frame times (median 10-20 ms, 0.3-1.2 % janky) come from Android and
 virgl, not the host path.
 
+## Against Waydroid (X399, 2026-11-21)
+
+airDroid's side, default mode (virgl, 8 processors and 4 GB for
+Android, LineageOS 20.0-20260927 VANILLA, 1920x1080, GTX 1070 through
+Zink on NVK on NVIDIA's resource manager):
+
+| | airDroid on air/OS |
+|---|---|
+| Android boot (start to `sys.boot_completed`) | 19.2 s (21 s from starting the app) |
+| Settings cold start (`am start -W`, TotalTime) | 475-519 ms |
+| Clock cold start | 506 ms |
+| Scroll test (6 swipe pairs in Settings) | 305-332 frames, 0-0.3 % janky |
+| Frame time, median / 90th / 99th percentile | 5-6 / 7-9 / 9-18 ms |
+
+Waydroid's side on the same machine (a Linux live image; the GTX 1070
+has only nouveau there, which cannot raise the card's clocks): see
+below once measured.
+
 ## Needs
 
 * air/OS with haiku 353344194f (NVMM page-protection fix), i.e. images from
