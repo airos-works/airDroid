@@ -1,0 +1,27 @@
+From: airDroid <airdroid@airos.works>
+Subject: [PATCH] virtio-gpu-virgl: poll fences every millisecond
+
+QEMU looks for signalled virgl fences on a 10 ms timer. A guest frame is
+done for Android when its fence signals, so every swap waited for the
+next tick: 9.98 ms at the median between SwapBuffers and FrameCompleted in
+Android's frame statistics, most of a 60 Hz frame, with the app short of
+buffers behind it. Poll every millisecond while fences are pending.
+---
+--- a/hw/display/virtio-gpu-virgl.c
++++ b/hw/display/virtio-gpu-virgl.c
+@@ -1116,7 +1116,14 @@
+     virgl_renderer_poll();
+     virtio_gpu_process_cmdq(g);
+     if (!QTAILQ_EMPTY(&g->cmdq) || !QTAILQ_EMPTY(&g->fenceq)) {
+-        timer_mod(gl->fence_poll, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
++        /*
++         * airDroid: every millisecond while fences are pending, not every
++         * ten. A guest frame is finished for Android when its fence
++         * signals: at 10 ms every swap waited for the next tick (9.98 ms at
++         * the median in Android's frame statistics), which is most of a
++         * 60 Hz frame and left apps waiting for a free buffer.
++         */
++        timer_mod(gl->fence_poll, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
+     }
+ }
+ 
