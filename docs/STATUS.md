@@ -152,20 +152,53 @@ virgl, not the host path.
       airDroid (a process with a live NVK device and imported host
       memory forks a child that uses the GPU): a bug in air/OS or its
       NVIDIA driver glue, not found yet.
-   4. Android's window buffers, open. Probed in the nested VM (Android's
-      UI on Vulkan, `debug.hwui.renderer=skiavk`): HWUI aborts with
-      "Assertion failed: !hasKHRSwapchainExtension". Mesa's Venus
-      driver in the guest offers VK_ANDROID_native_buffer (which
-      Android's swapchain is built on) only when the host renderer has
-      dma-buf import, VK_EXT_image_drm_format_modifier,
-      VK_EXT_queue_family_foreign, and sync-fd fence export and
-      semaphore import. air/OS has no dma-bufs or sync files (NVK on
-      NVIDIA's RM lists the extensions and cannot do either; lavapipe
-      22 lacks them). Plan: emulate them in vkr on air/OS. A gralloc
-      buffer a Vulkan app renders to gets a shared locked area as its
-      memory (host pointer import, linear), which QEMU's present path
-      then reads instead of the GL texture (no GPU read-back at all);
-      fences and semaphores are waited for and signalled in vkr.
+   4. Android's window buffers: work on the X399. With
+      `debug.hwui.renderer=skiavk` (a line in props.override on the
+      data disk; Android's UI stays on GL otherwise, and Vulkan apps
+      use Venus either way with `gpu: "venus"`) Android's UI renders
+      through
+      Venus on NVK: Settings shows and scrolls (328 frames, 0.9 % janky,
+      median 13 ms, 99th percentile 26 ms; the host reads a frame in
+      0.7 ms, GL frames take 1.1-1.6 ms). How:
+      * Mesa's Venus driver in the guest offers Android's window buffer
+        support only if the renderer has dma-buf import, DRM format
+        modifiers, a foreign queue family and sync fds. NVK on NVIDIA's
+        RM lists them all and has neither dma-bufs nor sync files: vkr
+        answers the sync fd queries itself and does what the three
+        resource commands are for with the fences and semaphores.
+      * A gralloc buffer is a GL (virgl) resource that cannot be
+        exported: when Venus attaches one, virglrenderer gives it a
+        shadow, a shared locked area with the resource's rows (at a
+        pitch of whole 32 bytes: NVIDIA samples a linear image only at
+        such a pitch), which vkr imports as host memory for the image.
+        The GPU renders straight into it (`tools/dev/vkimage.c`: 5.3 ms
+        a 1280x720 frame with submit and wait), and reads of the
+        resource (the present path) come from it: no GPU read-back.
+      * Also needed: host memory types shown to the guest as device
+        local (Skia takes a hardware buffer only then), device creation
+        retried at medium queue priority (NVK refuses Android's high),
+        no sync fd export on fences and semaphores, and 8192 file
+        descriptors for QEMU and the render server (NVK opens one per
+        memory mapping; air/OS gives 256).
+      Six sessions in a row on the X399 (boot, Settings, scroll, quit):
+      each on the Vulkan pipeline with about 370 frames, nothing left
+      behind on quit. Two hangs on the way there were ours: a wait for
+      an exported semaphore that stalled the host queue, and the
+      render server deleting a window buffer's area while the driver
+      still had its pages pinned for a Vulkan import (delete_area()
+      waits; the worker that waited also delivers the context's
+      fences). Each import now maps the area by itself.
+      Open: GL consumers of a Vulkan-rendered buffer (SurfaceFlinger's
+      own composition, screenshots) see the GL texture, not the shadow;
+      a shadow is filled from GL once, when Venus attaches the buffer;
+      one render server crash early on was not seen again and not
+      explained; only Android's own UI (Skia) has been run on it, no
+      third-party Vulkan app or game yet.
+      Host bug met on the way (air/OS, not airDroid): the X399 reset or
+      hung several times while a render server was stuck like that; a
+      stuck process should not take the machine down. See also the
+      fork bug above. The default mode is unchanged by all this (X399:
+      19.7 s to boot, 94 ms for the scroll test).
    Tried earlier on Linux/KVM with lavapipe (QEMU on Xvfb, SDL GL):
    Android enumerates the Venus device and the render server starts,
    but rendering into gralloc buffers ends in "aborting on ring fatal

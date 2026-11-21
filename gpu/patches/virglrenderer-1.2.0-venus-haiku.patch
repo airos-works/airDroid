@@ -86,7 +86,36 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
        proxy_log("failed to validate shm size(%" PRIu64 ") expected(%" PRIu64 ")", size,
                  expected_size);
        return false;
-@@ -521,7 +523,7 @@
+@@ -468,6 +470,28 @@
+    if (res_fd_type == VIRGL_RESOURCE_FD_INVALID) {
+       /* importable pipe resouce can only export as dma-buf */
+       res_fd_type = virgl_resource_export_fd(res, &res_fd);
++#ifdef __HAIKU__
++      /* no dma-bufs: the resource's shadow, as shared memory (the server
++       * maps it and has the driver import that as host memory)
++       */
++      if (res_fd_type == VIRGL_RESOURCE_FD_INVALID) {
++         res_fd = virgl_resource_get_shadow_fd(res, &res_size);
++         if (res_fd >= 0) {
++            const struct render_context_op_import_resource_request shadow_req = {
++               .header.op = RENDER_CONTEXT_OP_IMPORT_RESOURCE,
++               .res_id = res_id,
++               .fd_type = VIRGL_RESOURCE_FD_SHM,
++               .size = res_size,
++            };
++            if (!proxy_socket_send_request_with_fds(&ctx->socket, &shadow_req,
++                                                    sizeof(shadow_req), &res_fd, 1))
++               proxy_log("failed to attach res %d", res_id);
++            close(res_fd);
++            proxy_context_resource_add(ctx, res_id);
++            return;
++         }
++      }
++#endif
+       if (res_fd_type != VIRGL_RESOURCE_FD_DMABUF) {
+          /* close fd for unexpected fd type from succeeded export */
+          if (res_fd_type != VIRGL_RESOURCE_FD_INVALID)
+@@ -521,7 +545,7 @@
     }
  
     if (ctx->shmem.ptr)
@@ -95,7 +124,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
     if (ctx->shmem.fd >= 0)
        close(ctx->shmem.fd);
  
-@@ -613,27 +615,19 @@
+@@ -613,27 +637,19 @@
  static int
  alloc_memfd(const char *name, size_t size, void **out_ptr)
  {
@@ -130,6 +159,25 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  }
  
  static bool
+--- a/src/proxy/proxy_socket.c
++++ b/src/proxy/proxy_socket.c
+@@ -99,6 +99,16 @@
+ static bool
+ proxy_socket_recvmsg(struct proxy_socket *socket, struct msghdr *msg)
+ {
++   /* The caller (the VMM's main thread) waits for the server here with the
++    * whole machine behind it: say so when that takes long.
++    */
++   for (int waited = 0;; waited += 3) {
++      struct pollfd pfd = { .fd = socket->fd, .events = POLLIN };
++      if (poll(&pfd, 1, 3000) != 0)
++         break;
++      proxy_log("no reply from the render server for %d s", waited + 3);
++   }
++
+    do {
+       const ssize_t s = recvmsg(socket->fd, msg, MSG_CMSG_CLOEXEC);
+       if (unlikely(s < 0)) {
 --- a/src/venus/vkr_context.c
 +++ b/src/venus/vkr_context.c
 @@ -3,6 +3,7 @@
@@ -207,6 +255,41 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  
        ((VkDeviceCreateInfo *)args->pCreateInfo)->ppEnabledExtensionNames = exts;
        ((VkDeviceCreateInfo *)args->pCreateInfo)->enabledExtensionCount = ext_count;
+@@ -165,7 +168,34 @@
+    vn_replace_vkCreateDevice_args_handle(args);
+    args->ret = vk->CreateDevice(args->physicalDevice, args->pCreateInfo, NULL,
+                                 &dev->base.handle.device);
++   if (args->ret == VK_ERROR_NOT_PERMITTED_KHR) {
++      /* A queue priority this process may not have (Android's UI asks for
++       * high; NVK, like most Mesa drivers, gives a normal process medium at
++       * most): the client gets its device, at the priority we can have.
++       */
++      bool lowered = false;
++      for (uint32_t i = 0; i < args->pCreateInfo->queueCreateInfoCount; i++) {
++         VkDeviceQueueGlobalPriorityCreateInfoKHR *priority = vkr_find_struct(
++            args->pCreateInfo->pQueueCreateInfos[i].pNext,
++            VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR);
++         if (priority && priority->globalPriority > VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR) {
++            priority->globalPriority = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR;
++            lowered = true;
++         }
++      }
++      if (lowered) {
++         args->ret = vk->CreateDevice(args->physicalDevice, args->pCreateInfo, NULL,
++                                      &dev->base.handle.device);
++      }
++   }
+    if (args->ret != VK_SUCCESS) {
++      /* which of what the client asked for the driver does not have is
++       * otherwise anyone's guess
++       */
++      vkr_log("vkCreateDevice failed (%d) with %u extensions:", args->ret,
++              args->pCreateInfo->enabledExtensionCount);
++      for (uint32_t i = 0; i < args->pCreateInfo->enabledExtensionCount; i++)
++         vkr_log("  %s", args->pCreateInfo->ppEnabledExtensionNames[i]);
+       free(exts);
+       free(dev);
+       return;
 --- a/src/venus/vkr_device_memory.c
 +++ b/src/venus/vkr_device_memory.c
 @@ -4,6 +4,7 @@
@@ -217,7 +300,56 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  
  #include "venus-protocol/vn_protocol_renderer_transport.h"
  
-@@ -280,8 +281,42 @@
+@@ -248,7 +249,47 @@
+    VkImportMemoryResourceInfoMESA *res_info = NULL;
+    VkBaseInStructure *prev_of_res_info = vkr_find_prev_struct(
+       alloc_info, VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA);
+-   if (prev_of_res_info) {
++   VkImportMemoryHostPointerInfoEXT res_host_info;
++   struct vkr_resource *shm_res = NULL;
++   void *res_import_ptr = NULL;
++   uint64_t res_import_size = 0;
++   if (prev_of_res_info && physical_dev->host_pointer_import) {
++      /* a resource that is shared memory of ours (a typed resource's shadow,
++       * where there are no dma-bufs): imported as host memory
++       */
++      res_info = (VkImportMemoryResourceInfoMESA *)prev_of_res_info->pNext;
++      shm_res = vkr_context_get_resource(ctx, res_info->resourceId);
++      if (shm_res && shm_res->fd_type != VIRGL_RESOURCE_FD_SHM)
++         shm_res = NULL;
++   }
++   if (shm_res) {
++      const uint64_t align = physical_dev->host_pointer_alignment;
++      const uint64_t size = (alloc_info->allocationSize + align - 1) / align * align;
++      if (size > ((shm_res->size + align - 1) / align * align)) {
++         vkr_log("resource %u has %zu bytes, %" PRIu64 " wanted", res_info->resourceId,
++                 shm_res->size, alloc_info->allocationSize);
++         args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
++         return;
++      }
++      /* the import's own mapping (virgl_shm_clone()): the resource may go
++       * before the memory does
++       */
++      void *import_ptr = virgl_shm_clone(shm_res->u.data);
++      if (!import_ptr) {
++         args->ret = VK_ERROR_OUT_OF_HOST_MEMORY;
++         return;
++      }
++      res_import_ptr = import_ptr;
++      res_import_size = (shm_res->size + align - 1) / align * align;
++      res_host_info = (const VkImportMemoryHostPointerInfoEXT){
++         .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
++         .pNext = res_info->pNext,
++         .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
++         .pHostPointer = import_ptr,
++      };
++      prev_of_res_info->pNext = (const struct VkBaseInStructure *)&res_host_info;
++      alloc_info->allocationSize = size;
++   } else if (prev_of_res_info) {
+       res_info = (VkImportMemoryResourceInfoMESA *)prev_of_res_info->pNext;
+       if (!vkr_get_fd_info_from_resource_info(ctx, res_info, &local_import_info)) {
+          args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+@@ -280,8 +321,42 @@
     uint32_t valid_fd_types = 0;
     int udmabuf_fd = -1;
     void *gbm_bo = NULL;
@@ -261,7 +393,15 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
        /* An implementation can support dma_buf import along with opaque fd export/import.
         * If the client driver is using external memory and requesting dma_buf, without
         * dma_buf fd export support, we must use gbm bo import path instead of forcing
-@@ -373,6 +408,10 @@
+@@ -369,10 +444,20 @@
+ 
+    struct vkr_device_memory *mem = vkr_device_memory_create_and_add(ctx, args);
+    if (!mem) {
++      vkr_log("vkAllocateMemory failed (%d): %" PRIu64 " bytes of type %u (flags %#x)%s%s",
++              args->ret, alloc_info->allocationSize, mem_type_index, property_flags,
++              shm_ptr ? ", our shared memory imported" : "",
++              shm_res ? ", a resource's shared memory imported" : "");
+       if (local_import_info.fd >= 0)
           close(local_import_info.fd);
        if (gbm_bo)
           vkr_gbm_bo_destroy(gbm_bo);
@@ -269,20 +409,22 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 +         virgl_shm_unmap(shm_ptr, shm_size);
 +         close(shm_fd);
 +      }
++      if (res_import_ptr)
++         virgl_shm_unmap(res_import_ptr, res_import_size);
        return;
     }
  
-@@ -381,6 +420,9 @@
+@@ -381,6 +466,9 @@
     mem->property_flags = property_flags;
     mem->valid_fd_types = valid_fd_types;
     mem->udmabuf_fd = udmabuf_fd;
 +   mem->shm_fd = shm_fd;
-+   mem->shm_ptr = shm_ptr;
-+   mem->shm_size = shm_size;
++   mem->shm_ptr = shm_ptr ? shm_ptr : res_import_ptr;
++   mem->shm_size = shm_ptr ? shm_size : res_import_size;
     mem->gbm_bo = gbm_bo;
     mem->allocation_size = alloc_info->allocationSize;
     mem->memory_type_index = mem_type_index;
-@@ -395,8 +437,16 @@
+@@ -395,8 +483,16 @@
     if (!mem)
        return;
  
@@ -299,7 +441,36 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  }
  
  static void
-@@ -494,6 +544,10 @@
+@@ -440,6 +536,28 @@
+       return;
+    }
+ 
++   if (res->fd_type == VIRGL_RESOURCE_FD_SHM && dev->physical_device->host_pointer_import) {
++      /* shared memory of ours, to be imported as host memory: every type
++       * that is not device local takes that (what the drivers say for a host
++       * pointer; the protocol has no call to ask them)
++       */
++      const VkPhysicalDeviceMemoryProperties *mem_props =
++         &dev->physical_device->memory_properties;
++      uint32_t type_bits = 0;
++      for (uint32_t i = 0; i < mem_props->memoryTypeCount; i++) {
++         if (mem_props->memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
++            type_bits |= 1u << i;
++      }
++      args->pMemoryResourceProperties->memoryTypeBits = type_bits;
++      VkMemoryResourceAllocationSizePropertiesMESA *size_props =
++         vkr_find_struct(args->pMemoryResourceProperties->pNext,
++                         VK_STRUCTURE_TYPE_MEMORY_RESOURCE_ALLOCATION_SIZE_PROPERTIES_MESA);
++      if (size_props)
++         size_props->allocationSize = res->size;
++      args->ret = VK_SUCCESS;
++      return;
++   }
++
+    if (res->fd_type != VIRGL_RESOURCE_FD_DMABUF) {
+       args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+       return;
+@@ -494,6 +612,10 @@
        vkr_gbm_bo_destroy(mem->gbm_bo);
     if (mem->udmabuf_fd >= 0)
        close(mem->udmabuf_fd);
@@ -310,7 +481,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  }
  
  bool
-@@ -527,6 +581,25 @@
+@@ -527,6 +649,26 @@
                                        : VIRGL_RENDERER_MAP_CACHE_WC;
     }
  
@@ -318,7 +489,8 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 +      /* our own shared memory: the same descriptor again */
 +      const int shm_fd = os_dupfd_cloexec(mem->shm_fd);
 +      if (shm_fd < 0 || mem->shm_size < blob_size) {
-+         vkr_log("mem shm export failed");
++         vkr_log("mem shm export failed (%" PRIu64 " bytes there, %" PRIu64 " wanted)",
++                 mem->shm_size, blob_size);
 +         if (shm_fd >= 0)
 +            close(shm_fd);
 +         return false;
@@ -352,9 +524,57 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
     uint64_t allocation_size;
     uint32_t memory_type_index;
  
+--- a/src/venus/vkr_image.c
++++ b/src/venus/vkr_image.c
+@@ -3,6 +3,7 @@
+  * SPDX-License-Identifier: MIT
+  */
+ 
++#include "virgl_resource.h"
+ #include "vkr_image.h"
+ 
+ #include "vkr_image_gen.h"
+@@ -31,7 +32,37 @@
+     * situation because the app does not consider the memory external.
+     */
+ 
++   struct vkr_device *dev = vkr_device_from_handle(args->device);
++   VkImageDrmFormatModifierExplicitCreateInfoEXT *explicit_info = vkr_find_struct(
++      args->pCreateInfo->pNext,
++      VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT);
++   if (dev && dev->physical_device->host_pointer_import && explicit_info &&
++       explicit_info->drmFormatModifierPlaneCount >= 1) {
++      /* An image on a resource of the client's (a window buffer): its memory
++       * is the resource's shadow (virgl_resource.h), whose rows are spaced
++       * for the device (VIRGL_SHADOW_PITCH_ALIGN: NVIDIA samples a linear
++       * image only at a pitch of whole 32 bytes), not as the client's
++       * allocator had them. The client never sees this memory itself.
++       */
++      VkSubresourceLayout *layout = (VkSubresourceLayout *)&explicit_info->pPlaneLayouts[0];
++      const VkDeviceSize pitch =
++         (layout->rowPitch + VIRGL_SHADOW_PITCH_ALIGN - 1) / VIRGL_SHADOW_PITCH_ALIGN *
++         VIRGL_SHADOW_PITCH_ALIGN;
++      if (pitch != layout->rowPitch) {
++         vkr_log("image %ux%u: row pitch %" PRIu64 " -> %" PRIu64 " (modifier %#" PRIx64 ")",
++                 args->pCreateInfo->extent.width, args->pCreateInfo->extent.height,
++                 layout->rowPitch, pitch, explicit_info->drmFormatModifier);
++         layout->rowPitch = pitch;
++      }
++   }
++
++   const VkImageCreateInfo info = *args->pCreateInfo;
+    vkr_image_create_and_add(dispatch->data, args);
++   if (args->ret != VK_SUCCESS) {
++      vkr_log("vkCreateImage failed (%d): format %d tiling %d usage %#x flags %#x %ux%u",
++              args->ret, info.format, info.tiling, info.usage, info.flags, info.extent.width,
++              info.extent.height);
++   }
+ }
+ 
+ static void
 --- a/src/venus/vkr_physical_device.c
 +++ b/src/venus/vkr_physical_device.c
-@@ -227,8 +227,45 @@
+@@ -227,8 +227,54 @@
            VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT);
     }
  
@@ -389,6 +609,15 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 +            mem_props->memoryTypes[i].propertyFlags &=
 +               ~(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
 +                 VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
++         } else if (mem_props->memoryTypes[i].propertyFlags &
++                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
++            /* The types host memory is imported as are where the client's
++             * window buffers (and everything else it shares) live, and
++             * Android's Skia takes a hardware buffer only if one of its
++             * memory types says device local. The bit is a hint to the
++             * client about speed; the device does render into this memory.
++             */
++            mem_props->memoryTypes[i].propertyFlags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 +         }
 +      }
 +   }
@@ -401,7 +630,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
         !physical_dev->is_opaque_fd_export_supported &&
         physical_dev->EXT_external_memory_dma_buf)
        physical_dev->gbm_device = vkr_physical_device_get_gbm_device();
-@@ -273,6 +310,8 @@
+@@ -273,6 +319,8 @@
           physical_dev->KHR_external_memory_fd = true;
        else if (!strcmp(props->extensionName, "VK_EXT_external_memory_dma_buf"))
           physical_dev->EXT_external_memory_dma_buf = true;
@@ -410,6 +639,85 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
        else if (!strcmp(props->extensionName, "VK_KHR_external_fence_fd"))
           physical_dev->KHR_external_fence_fd = true;
  
+@@ -715,6 +763,28 @@
+    vn_replace_vkGetPhysicalDeviceImageFormatProperties2_args_handle(args);
+    args->ret = vk->GetPhysicalDeviceImageFormatProperties2(
+       args->physicalDevice, args->pImageFormatInfo, args->pImageFormatProperties);
++
++   const VkPhysicalDeviceExternalImageFormatInfo *ext_info = vkr_find_struct(
++      args->pImageFormatInfo->pNext,
++      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO);
++   if (ext_info && ext_info->handleType) {
++      /* what the client driver asks about external images says what it is
++       * about to do with them, and why it then does not
++       */
++      const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *mod_info = vkr_find_struct(
++         args->pImageFormatInfo->pNext,
++         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT);
++      const VkExternalImageFormatProperties *ext_props = vkr_find_struct(
++         args->pImageFormatProperties->pNext,
++         VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES);
++      vkr_log("external image format: format %d tiling %d usage %#x flags %#x handle %#x "
++              "modifier %#" PRIx64 "%s: %d, external features %#x",
++              args->pImageFormatInfo->format, args->pImageFormatInfo->tiling,
++              args->pImageFormatInfo->usage, args->pImageFormatInfo->flags,
++              ext_info->handleType, mod_info ? mod_info->drmFormatModifier : 0,
++              mod_info ? "" : " (none)", args->ret,
++              ext_props ? ext_props->externalMemoryProperties.externalMemoryFeatures : 0);
++   }
+ }
+ 
+ static void
+@@ -754,10 +824,27 @@
+       vkr_physical_device_from_handle(args->physicalDevice);
+    struct vn_physical_device_proc_table *vk = &physical_dev->proc_table;
+ 
++   const bool emulate_sync_fd =
++      physical_dev->host_pointer_import &&
++      args->pExternalSemaphoreInfo->handleType ==
++         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
++
+    vn_replace_vkGetPhysicalDeviceExternalSemaphoreProperties_args_handle(args);
+    vk->GetPhysicalDeviceExternalSemaphoreProperties(args->physicalDevice,
+                                                     args->pExternalSemaphoreInfo,
+                                                     args->pExternalSemaphoreProperties);
++
++   /* No sync files here: vkr stands in for them (vkr_queue.c), which is all
++    * the client driver's sync fd support (Android's window buffers) asks of
++    * the renderer.
++    */
++   if (emulate_sync_fd) {
++      VkExternalSemaphoreProperties *props = args->pExternalSemaphoreProperties;
++      props->exportFromImportedHandleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
++      props->compatibleHandleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
++      props->externalSemaphoreFeatures = VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT |
++                                         VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
++   }
+ }
+ 
+ static void
+@@ -769,9 +856,21 @@
+       vkr_physical_device_from_handle(args->physicalDevice);
+    struct vn_physical_device_proc_table *vk = &physical_dev->proc_table;
+ 
++   const bool emulate_sync_fd =
++      physical_dev->host_pointer_import &&
++      args->pExternalFenceInfo->handleType == VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
++
+    vn_replace_vkGetPhysicalDeviceExternalFenceProperties_args_handle(args);
+    vk->GetPhysicalDeviceExternalFenceProperties(
+       args->physicalDevice, args->pExternalFenceInfo, args->pExternalFenceProperties);
++
++   if (emulate_sync_fd) {
++      VkExternalFenceProperties *props = args->pExternalFenceProperties;
++      props->exportFromImportedHandleTypes = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
++      props->compatibleHandleTypes = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
++      props->externalFenceFeatures = VK_EXTERNAL_FENCE_FEATURE_EXPORTABLE_BIT |
++                                     VK_EXTERNAL_FENCE_FEATURE_IMPORTABLE_BIT;
++   }
+ }
+ 
+ static void
 --- a/src/venus/vkr_physical_device.h
 +++ b/src/venus/vkr_physical_device.h
 @@ -23,6 +23,7 @@
@@ -434,17 +742,258 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
     VkQueueFamilyProperties *queue_family_properties;
     uint32_t queue_family_property_count;
  
+--- a/src/venus/vkr_queue.c
++++ b/src/venus/vkr_queue.c
+@@ -422,10 +422,22 @@
+    mtx_unlock(&queue->vk_mutex);
+ }
+ 
++static inline bool
++vkr_device_emulates_sync_fd(const struct vkr_device *dev);
++
+ static void
+ vkr_dispatch_vkCreateFence(struct vn_dispatch_context *dispatch,
+                            struct vn_command_vkCreateFence *args)
+ {
++   struct vkr_device *dev = vkr_device_from_handle(args->device);
++   if (dev && vkr_device_emulates_sync_fd(dev)) {
++      /* as for semaphores: no sync fd to export */
++      VkExportFenceCreateInfo *export_info = vkr_find_struct(
++         args->pCreateInfo->pNext, VK_STRUCTURE_TYPE_EXPORT_FENCE_CREATE_INFO);
++      if (export_info)
++         export_info->handleTypes &= ~VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
++   }
++
+    vkr_fence_create_and_add(dispatch->data, args);
+ }
+ 
+@@ -470,6 +482,25 @@
+                                  args->waitAll, args->timeout);
+ }
+ 
++/* Sync files stand between the client driver and the renderer in three
++ * places (below). Where the renderer's system has none (air/OS) but its
++ * memory comes from us (host_pointer_import), vkr does what each of them is
++ * for with the fences and semaphores themselves.
++ */
++static inline bool
++vkr_device_emulates_sync_fd(const struct vkr_device *dev)
++{
++   return dev->physical_device->host_pointer_import;
++}
++
++static VkQueue
++vkr_device_any_queue(struct vkr_device *dev)
++{
++   list_for_each_entry (struct vkr_queue, queue, &dev->queues, base.track_head)
++      return queue->base.handle.queue;
++   return VK_NULL_HANDLE;
++}
++
+ static void
+ vkr_dispatch_vkResetFenceResourceMESA(struct vn_dispatch_context *dispatch,
+                                       struct vn_command_vkResetFenceResourceMESA *args)
+@@ -481,6 +512,21 @@
+ 
+    vn_replace_vkResetFenceResourceMESA_args_handle(args);
+ 
++   if (vkr_device_emulates_sync_fd(dev)) {
++      /* Exporting a sync fd leaves the fence reset once its submission is
++       * done; the client has its own sync for that submission already.
++       */
++      VkResult result = vk->WaitForFences(args->device, 1, &args->fence, VK_TRUE,
++                                          5ull * 1000 * 1000 * 1000);
++      if (result == VK_TIMEOUT)
++         vkr_log("a fence exported as a sync fd was not signalled within 5 s");
++      if (result == VK_SUCCESS || result == VK_TIMEOUT)
++         result = vk->ResetFences(args->device, 1, &args->fence);
++      if (result != VK_SUCCESS)
++         vkr_context_set_fatal(ctx);
++      return;
++   }
++
+    const VkFenceGetFdInfoKHR info = {
+       .sType = VK_STRUCTURE_TYPE_FENCE_GET_FD_INFO_KHR,
+       .fence = args->fence,
+@@ -500,6 +546,18 @@
+ vkr_dispatch_vkCreateSemaphore(struct vn_dispatch_context *dispatch,
+                                struct vn_command_vkCreateSemaphore *args)
+ {
++   struct vkr_device *dev = vkr_device_from_handle(args->device);
++   if (dev && vkr_device_emulates_sync_fd(dev)) {
++      /* the driver has no sync fd to export (it would refuse the
++       * semaphore); what the client does with one goes through the
++       * resource commands above
++       */
++      VkExportSemaphoreCreateInfo *export_info = vkr_find_struct(
++         args->pCreateInfo->pNext, VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO);
++      if (export_info)
++         export_info->handleTypes &= ~VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
++   }
++
+    vkr_semaphore_create_and_add(dispatch->data, args);
+ }
+ 
+@@ -555,6 +613,20 @@
+ 
+    vn_replace_vkWaitSemaphoreResourceMESA_args_handle(args);
+ 
++   if (vkr_device_emulates_sync_fd(dev)) {
++      /* Exporting a sync fd takes the semaphore's signal. The only way to
++       * take it here is a submission that waits for it, and one whose
++       * semaphore is never signalled on this queue stalls the queue for
++       * good (every later submission, the client's fences with them: seen
++       * as Android hanging with everything idle). The clients that export
++       * (Android's UI: a semaphore a frame, destroyed after) do not signal
++       * the semaphore again, so it is left signalled.
++       */
++      (void)vk;
++      (void)ctx;
++      return;
++   }
++
+    const VkSemaphoreGetFdInfoKHR info = {
+       .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
+       .semaphore = args->semaphore,
+@@ -586,6 +658,20 @@
+    /* resourceId 0 is for importing a signaled payload to sync_fd fence */
+    assert(!res_info->resourceId);
+ 
++   if (vkr_device_emulates_sync_fd(dev)) {
++      /* a signaled payload: a submission that only signals it */
++      const VkSubmitInfo submit = {
++         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
++         .signalSemaphoreCount = 1,
++         .pSignalSemaphores = &res_info->semaphore,
++      };
++      const VkQueue queue = vkr_device_any_queue(dev);
++      if (queue == VK_NULL_HANDLE ||
++          vk->QueueSubmit(queue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS)
++         vkr_context_set_fatal(ctx);
++      return;
++   }
++
+    const VkImportSemaphoreFdInfoKHR import_info = {
+       .sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
+       .semaphore = res_info->semaphore,
 --- a/src/virglrenderer.c
 +++ b/src/virglrenderer.c
-@@ -50,6 +50,7 @@
+@@ -50,6 +50,8 @@
  #include "util/libsync.h"
  #endif
  
 +#include "virgl_shm.h"
++#include "util/os_file.h"
  #include "virglrenderer.h"
  #include "virtgpu_drm.h"
  
-@@ -1248,7 +1249,7 @@
+@@ -344,6 +346,95 @@
+    }
+ }
+ 
++int
++virgl_resource_get_shadow_fd(struct virgl_resource *res, uint64_t *out_size)
++{
++   if (!res->shadow_ptr) {
++      if (!res->pipe_resource)
++         return -1;
++
++      struct vrend_renderer_resource_info info;
++      vrend_renderer_resource_get_info(res->pipe_resource, &info);
++      if (!info.width || !info.height || info.depth > 1 || info.stride < info.width ||
++          info.stride % info.width)
++         return -1;
++
++      /* rows spaced as the device wants them (vkr_dispatch_vkCreateImage
++       * gives the image on it the same pitch)
++       */
++      const uint32_t stride = (info.stride + VIRGL_SHADOW_PITCH_ALIGN - 1) /
++                              VIRGL_SHADOW_PITCH_ALIGN * VIRGL_SHADOW_PITCH_ALIGN;
++      const uint64_t size = (uint64_t)stride * info.height;
++      void *ptr = NULL;
++      const int fd = virgl_shm_create(size, "virgl shadow", &ptr);
++      if (fd < 0)
++         return -1;
++
++      /* what the resource holds now (what GL drew or the guest uploaded) */
++      struct pipe_box box = { .width = info.width, .height = info.height, .depth = 1 };
++      struct iovec iov = { .iov_base = ptr, .iov_len = size };
++      const struct vrend_transfer_info transfer_info = {
++         .stride = stride,
++         .box = &box,
++         .iovec = &iov,
++         .iovec_cnt = 1,
++      };
++      if (vrend_renderer_transfer_pipe(res->pipe_resource, &transfer_info,
++                                       VIRGL_TRANSFER_FROM_HOST))
++         memset(ptr, 0, size);
++
++      res->shadow_ptr = ptr;
++      res->shadow_size = size;
++      res->shadow_stride = stride;
++      res->shadow_bpp = info.stride / info.width;
++      res->shadow_fd = fd;
++   }
++
++   *out_size = virgl_shm_size(res->shadow_fd);
++   return os_dupfd_cloexec(res->shadow_fd);
++}
++
++/* A read of a resource that has a shadow: the rows are there already. */
++static int
++virgl_resource_shadow_read(struct virgl_resource *res, uint32_t stride,
++                           const struct virgl_box *box, uint64_t offset,
++                           const struct iovec *iovec, int iovec_cnt)
++{
++   const uint32_t bpp = res->shadow_bpp;
++   const uint64_t row = (uint64_t)box->w * bpp;
++   if (!stride)
++      stride = res->shadow_stride;
++
++   if (!box->w || !box->h || (uint64_t)box->x * bpp + row > res->shadow_stride ||
++       ((uint64_t)box->y + box->h) * res->shadow_stride > res->shadow_size || stride < row)
++      return EINVAL;
++
++   if (!iovec || !iovec_cnt) {
++      iovec = res->iov;
++      iovec_cnt = res->iov_count;
++      if (!iovec)
++         return EINVAL;
++   }
++
++   const uint8_t *src = (const uint8_t *)res->shadow_ptr +
++                        (uint64_t)box->y * res->shadow_stride + (uint64_t)box->x * bpp;
++   if (iovec_cnt == 1 && stride == res->shadow_stride && row == stride) {
++      /* whole rows into one piece: one copy */
++      const uint64_t len = (uint64_t)box->h * stride;
++      if (offset + len > iovec[0].iov_len)
++         return EINVAL;
++      memcpy((uint8_t *)iovec[0].iov_base + offset, src, len);
++      return 0;
++   }
++   for (uint32_t y = 0; y < box->h; y++) {
++      if (vrend_write_to_iovec(iovec, iovec_cnt, offset + (uint64_t)y * stride,
++                               (const char *)src + (uint64_t)y * res->shadow_stride,
++                               row) != row)
++         return EINVAL;
++   }
++   return 0;
++}
++
+ int virgl_renderer_transfer_read_iov(uint32_t handle, uint32_t ctx_id,
+                                      uint32_t level, uint32_t stride,
+                                      uint32_t layer_stride,
+@@ -358,6 +449,9 @@
+    if (!res)
+       return EINVAL;
+ 
++   if (res->shadow_ptr && level == 0)
++      return virgl_resource_shadow_read(res, stride, box, offset, iovec, iovec_cnt);
++
+    transfer_info.level = level;
+    transfer_info.stride = stride;
+    transfer_info.layer_stride = layer_stride;
+@@ -1248,7 +1342,7 @@
        switch (export_fd_type) {
        case VIRGL_RESOURCE_FD_DMABUF:
        case VIRGL_RESOURCE_FD_SHM:
@@ -453,7 +1002,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
           map_size = res->map_size;
           break;
        case VIRGL_RESOURCE_FD_OPAQUE:
-@@ -1290,7 +1291,7 @@
+@@ -1290,7 +1384,7 @@
        case VIRGL_RESOURCE_FD_DMABUF:
        case VIRGL_RESOURCE_FD_SHM:
        case VIRGL_RESOURCE_OPAQUE_HANDLE:
@@ -462,9 +1011,60 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
           break;
        case VIRGL_RESOURCE_FD_OPAQUE:
           ret = vkr_allocator_resource_unmap(res);
+--- a/src/virgl_resource.c
++++ b/src/virgl_resource.c
+@@ -23,6 +23,7 @@
+  **************************************************************************/
+ 
+ #include "virgl_resource.h"
++#include "virgl_shm.h"
+ 
+ #include <assert.h>
+ #include <errno.h>
+@@ -49,6 +50,10 @@
+    if ((res->fd_type != VIRGL_RESOURCE_FD_INVALID) &&
+        (res->fd_type != VIRGL_RESOURCE_OPAQUE_HANDLE))
+       close(res->fd);
++   if (res->shadow_ptr) {
++      virgl_shm_unmap(res->shadow_ptr, res->shadow_size);
++      close(res->shadow_fd);
++   }
+ 
+    free(res);
+ }
+--- a/src/virgl_resource.h
++++ b/src/virgl_resource.h
+@@ -104,8 +104,27 @@
+    struct virgl_resource_vulkan_info vulkan_info;
+ 
+    void *private_data;
++
++   /* A typed resource's shadow: shared memory (virgl_shm.h) with the
++    * resource's rows, where the resource cannot be exported as a dma-buf
++    * (air/OS). Another renderer (Venus) imports it as the resource's memory
++    * and draws into it; from then on the resource is read from here.
++    * shadow_ptr is NULL while there is none.
++    */
++#define VIRGL_SHADOW_PITCH_ALIGN 32
++   void *shadow_ptr;
++   uint64_t shadow_size;
++   uint32_t shadow_stride;
++   uint32_t shadow_bpp;
++   int shadow_fd;
+ };
+ 
++/* The descriptor of res' shadow (the caller closes it), made on first use
++ * with what the resource holds; -1 if it cannot have one.
++ */
++int
++virgl_resource_get_shadow_fd(struct virgl_resource *res, uint64_t *out_size);
++
+ struct virgl_resource_pipe_callbacks {
+    void *data;
+ 
 --- a/src/virgl_shm.h
 +++ b/src/virgl_shm.h
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,199 @@
 +/*
 + * Copyright 2026 the airDroid project
 + * SPDX-License-Identifier: MIT
@@ -492,6 +1092,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 +#include <unistd.h>
 +
 +#include "util/anon_file.h"
++#include "util/macros.h"
 +
 +#ifdef __HAIKU__
 +
@@ -573,6 +1174,27 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 +   return addr;
 +}
 +
++/* Another mapping of what virgl_shm_create() or virgl_shm_map() mapped at
++ * ptr, to be unmapped by itself; NULL if that fails. For memory a driver
++ * pins (a host pointer import): an area with pinned pages cannot be deleted
++ * until they are released (delete_area() waits, for good if the import
++ * outlives it), so the import gets a mapping of its own and the original
++ * can go whenever its owner is done with it.
++ */
++static inline void *
++virgl_shm_clone(void *ptr)
++{
++   const area_id area = area_for(ptr);
++   area_info info;
++   if (area < 0 || get_area_info(area, &info) != B_OK || info.address != ptr)
++      return NULL;
++
++   void *addr = NULL;
++   const area_id clone = clone_area("virgl shm import", &addr, B_ANY_ADDRESS,
++                                    B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA, area);
++   return clone < 0 ? NULL : addr;
++}
++
 +/* How much memory fd names (a multiple of the page size here). */
 +static inline uint64_t
 +virgl_shm_size(int fd)
@@ -624,6 +1246,13 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 +virgl_shm_size(int fd)
 +{
 +   return lseek(fd, 0, SEEK_END);
++}
++
++static inline void *
++virgl_shm_clone(UNUSED void *ptr)
++{
++   /* only where memory is imported by host pointer */
++   return NULL;
 +}
 +
 +static inline int
