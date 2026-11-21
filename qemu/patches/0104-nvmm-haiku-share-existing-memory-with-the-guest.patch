@@ -1,9 +1,37 @@
 --- a/hw/display/virtio-gpu-virgl.c
 +++ b/hw/display/virtio-gpu-virgl.c
-@@ -1331,6 +1331,16 @@
+@@ -1308,6 +1308,22 @@
+     g_unix_fd_add(fd, G_IO_IN, airdroid_present_accept, g);
+ }
+ 
++#if defined(__HAIKU__) && VIRGL_RENDERER_CALLBACKS_VERSION >= 3
++/*
++ * airDroid: Venus' render server is started by the app, which hands us one
++ * end of a socket pair (AIRDROID_RENDER_SERVER_FD), instead of
++ * virglrenderer forking it from here: QEMU has a GPU device of its own by
++ * then (virgl's GL), and on air/OS a process that forks with a live Vulkan
++ * device on NVIDIA's resource manager takes the machine down.
++ */
++static int virgl_get_server_fd(void *opaque, uint32_t version)
++{
++    const char *fd = getenv("AIRDROID_RENDER_SERVER_FD");
++
++    return fd != NULL && *fd != '\0' ? atoi(fd) : -1;
++}
++#endif
++
+ int virtio_gpu_virgl_init(VirtIOGPU *g)
+ {
+     int ret;
+@@ -1331,6 +1347,21 @@
      }
  #endif
  
++#if defined(__HAIKU__) && VIRGL_RENDERER_CALLBACKS_VERSION >= 3
++    if (getenv("AIRDROID_RENDER_SERVER_FD") != NULL) {
++        virtio_gpu_3d_cbs.get_server_fd = virgl_get_server_fd;
++    }
++#endif
 +#ifdef __HAIKU__
 +    /*
 +     * airDroid: with blob resources on (Venus), vrend would also offer the
