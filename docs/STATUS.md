@@ -192,8 +192,16 @@ virgl, not the host path.
       own composition, screenshots) see the GL texture, not the shadow;
       a shadow is filled from GL once, when Venus attaches the buffer;
       one render server crash early on was not seen again and not
-      explained; only Android's own UI (Skia) has been run on it, no
-      third-party Vulkan app or game yet.
+      explained.
+      A third-party app: the Godot 4.3 editor (its Android APK has
+      x86_64 code) started with `--rendering-method mobile
+      --rendering-driver vulkan` reports "Vulkan 1.3.325 - Forward
+      Mobile - Using Device #0: NVIDIA - Virtio-GPU Venus (NVIDIA
+      GeForce GTX 1070 (NVK GP104-A))" and shows its project manager
+      (a VkSwapchain through Android's loader, where Android's UI
+      wraps buffers itself). With its default renderer it runs on the
+      GL path ("OpenGL ES 3.2 Mesa - virgl (zink Vulkan 1.3 (NVIDIA
+      GeForce GTX 1070 ...))").
       Host bug met on the way (air/OS, not airDroid): the X399 reset or
       hung several times while a render server was stuck like that; a
       stuck process should not take the machine down. See also the
