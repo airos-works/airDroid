@@ -833,6 +833,7 @@ public:
 		fGpu = new BPopUpMenu("gpu");
 		_AddItem(fGpu, "Automatic", 0, gpu == 0);
 		_AddItem(fGpu, "The GPU (virgl)", 1, gpu == 1);
+		_AddItem(fGpu, "The GPU, Vulkan too (experimental)", 3, gpu == 3);
 		_AddItem(fGpu, "Software (SwiftShader)", 2, gpu == 2);
 		fDpi = new BPopUpMenu("dpi");
 		const uint32 densities[] = { 0, 120, 160, 213, 240, 280, 320 };
@@ -920,7 +921,8 @@ public:
 				text << "ram=" << _Value(fRam) << "\n"
 					<< "cpus=" << _Value(fCpus) << "\n"
 					<< "gpu=" << (_Value(fGpu) == 1 ? "virgl"
-						: _Value(fGpu) == 2 ? "none" : "auto") << "\n"
+						: _Value(fGpu) == 2 ? "none"
+						: _Value(fGpu) == 3 ? "venus" : "auto") << "\n"
 					<< "dpi=" << _Value(fDpi) << "\n"
 					<< "touch=" << (fTouch->Value() == B_CONTROL_ON ? 1 : 0) << "\n"
 					<< "share=" << (fShare->Value() == B_CONTROL_ON
@@ -1469,7 +1471,8 @@ ad_main_set_status(const char* text, float progress)
 }
 
 
-/*! The settings window (one at a time). gpu: 0 auto, 1 virgl, 2 none. */
+/*! The settings window (one at a time). gpu: 0 auto, 1 virgl, 2 none,
+	3 venus. */
 void
 ad_settings_show(uint32 ramMB, uint32 cpus, uint32 gpu, uint32 dpi,
 	int touch, const char* share)
