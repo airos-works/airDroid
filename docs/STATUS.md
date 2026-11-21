@@ -115,7 +115,7 @@ Zink on NVK on NVIDIA's resource manager):
 | Settings cold start (`am start -W`, TotalTime) | 471-486 ms |
 | Clock cold start | 580 ms (WaitTime 587-818 ms) |
 | Scroll test (6 swipe pairs in Settings) | 305-331 frames, 0.3-0.7 % janky, every one on screen (302-326 host frames) |
-| Frame time, median / 90th / 99th percentile | 8-26 / 20-29 / 22-48 ms over ten runs |
+| Frame time, median / 90th / 99th percentile | 5-11 / 11-13 / 16-19 ms (8-26 / 20-29 / 22-48 ms before the fence fix below) |
 | airDroid's own CPU time for the test | 94-107 ms |
 
 Measure with the app's window on screen: start it once with
@@ -133,6 +133,28 @@ as a CD and repeat the same three measurements under Waydroid. Expect
 the graphics numbers to say more about nouveau than about Waydroid:
 on Linux this GTX 1070 has only nouveau, which cannot raise the card's
 clocks; boot and app start are the fair part.
+
+## Where a frame's time went (X399, 2026-11-22)
+
+Android's per-frame timestamps (`dumpsys gfxinfo <app> framestats`)
+for the Settings scroll test, median / 90th percentile in ms:
+
+| | before | after |
+|---|---|---|
+| wait for the render thread | 10.4 / 11.8 | 0.1 / 0.7 |
+| waiting for a free buffer (dequeue) | 14.3 / 15.4 | 0.01 / 0.01 |
+| swap until the frame is done | 9.98 / 10.7 | 1.6 / 2.2 |
+| vsync to frame done | 37.2 / 39.1 | 4.3 / 5.9 |
+| frame interval | 16.67 | 16.67 |
+
+Frames always came at the display's rate; each was 37 ms old when it
+was done. A frame is done for Android when its virgl fence signals,
+and QEMU looked for signalled fences on a 10 ms timer: every swap
+waited for the next tick (9.98 ms at the median), the render thread
+was still in that wait when the next frame arrived, and the app ran
+out of buffers behind it. QEMU patch 0105 polls every millisecond
+while fences are pending. The same in Vulkan mode (4.6 / 5.9 ms);
+QEMU's CPU time for the test did not go up (7.5 s before, 6.6-7.2 s).
 
 ## "Show Android" mode and app starts (X399, 2026-11-21)
 
