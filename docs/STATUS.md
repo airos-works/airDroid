@@ -125,30 +125,33 @@ virgl, not the host path.
 ## GPU plan
 
 1. Done: virgl (GL) through virglrenderer on EGL.
-2. Venus (Vulkan), in progress (`gpu: "venus"`, not offered in the
-   settings window; Vulkan apps use lavapipe on the CPU meanwhile).
-   What it takes on air/OS, in layers:
+2. Venus (Vulkan), experimental: `"gpu": "venus"` in settings.json (not
+   in the settings window; Vulkan apps use lavapipe on the CPU
+   otherwise). Android lists the host's GPU as its Vulkan device
+   ("Virtio-GPU Venus (NVIDIA GeForce GTX 1070 (NVK GP104-A))" on the
+   X399, "... (llvmpipe ...)" in the nested VM), with GL next to it as
+   before, but Vulkan apps cannot show windows yet (layer 4). In layers:
    1. Done (Haiku master 14478e9792): NVMM maps memory QEMU already
-      has into the guest, up to 1024 pieces per machine. `nvmm_hva_map()` always
-      replaces the range with new anonymous memory (as NetBSD's does);
-      `nvmm_hva_map_existing()` registers part of a fully locked area
-      instead, so memory shared with the render server can appear in
-      the guest's blob window. Test: `libnvmm_hva_existing`.
-   2. Works in the nested test VM (branch `venus`): QEMU registers
-      blob memory through `nvmm_hva_map_existing` (patch 0104), tells
-      the guest NVMM's address width (37 bits, so the blob window lands
-      where NVMM maps), does not offer GL blob buffers, and starts
-      virglrenderer's render server (packaged next to QEMU).
-   3. Works in the nested test VM with lavapipe (branch `venus`):
-      virglrenderer's Venus (vkr) and render server on air/OS: thread
-      workers (no signalfd there), and shared memory as locked areas
-      passed between the processes (`virgl_shm.h`). Android's
-      `cmd gpu vkjson` lists "Virtio-GPU Venus (llvmpipe ...)", driver
-      venus. Not yet on a GPU (NVK on the X399). Host-visible Vulkan
-      memory cannot be exported (NVK on NVIDIA's RM has no dma-buf or
-      opaque-fd export) but can be imported
-      (`VK_EXT_external_memory_host`): vkr allocates such memory as a
-      shared locked area and imports it.
+      has into the guest, up to 1024 pieces per machine
+      (`nvmm_hva_map_existing()`; `nvmm_hva_map()` always replaces the
+      range with new anonymous memory, as NetBSD's does). Test:
+      `libnvmm_hva_existing`.
+   2. Done: QEMU (patch 0104) registers blob memory through
+      `nvmm_hva_map_existing` and never lets NVMM replace memory it was
+      handed, tells the guest NVMM's address width (37 bits, so the blob
+      window lands where NVMM maps), and does not offer GL blob buffers
+      (they map the host GL driver's own memory).
+   3. Done: virglrenderer's Venus (vkr) and render server on air/OS:
+      thread workers (no signalfd there), shared memory as locked areas
+      passed between the processes (`virgl_shm.h`), host visible Vulkan
+      memory as such areas imported with VK_EXT_external_memory_host
+      (the drivers cannot export memory). The app starts the render
+      server and QEMU takes its socket (`get_server_fd`): forking it
+      from QEMU, which has a GPU device by then, lost QEMU's GL device
+      and reset the X399. `tools/dev/vkprobe.c` reproduces that without
+      airDroid (a process with a live NVK device and imported host
+      memory forks a child that uses the GPU): a bug in air/OS or its
+      NVIDIA driver glue, not found yet.
    4. Android's window buffers, open. Probed in the nested VM (Android's
       UI on Vulkan, `debug.hwui.renderer=skiavk`): HWUI aborts with
       "Assertion failed: !hasKHRSwapchainExtension". Mesa's Venus
