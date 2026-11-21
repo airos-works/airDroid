@@ -55,6 +55,14 @@ fn early_init() {
     let _ = std::fs::write("/proc/sys/kernel/printk", "4 4 1 7");
     // Android wants these to be writable by its own processes
     let _ = std::fs::write("/proc/sys/kernel/perf_event_paranoid", "3");
+    // Room in the sockets of Android's hardware composer: in "Show
+    // Android" mode it sends every layer again each frame, and its
+    // libwayland gives up (the composer aborts, Android's UI restarts)
+    // once a send finds the socket full. While QEMU is busy for seconds
+    // (an app's first shaders), the compositor waits in a virtio-gpu
+    // ioctl and reads nothing; the default 208 KiB lasted about a second.
+    let _ = std::fs::write("/proc/sys/net/core/wmem_max", "8388608");
+    let _ = std::fs::write("/proc/sys/net/core/wmem_default", "4194304");
     unsafe { libc::setsid() };
 }
 
@@ -81,6 +89,10 @@ fn poweroff() -> ! {
     };
     if r != 0 {
         logf!("data disk stays writable: {}", std::io::Error::last_os_error());
+    }
+    // what was said to the host on the way down is written first
+    if let Some(l) = hostlink::link() {
+        l.flush(Duration::from_secs(2));
     }
     unsafe {
         libc::sync();
@@ -306,6 +318,7 @@ fn boot(link: &HostLink, cfg: &container::Config, inbox: &Arc<compositor::Inbox>
                     status(&link, BootStage::Booted, &format!("Android booted in {:.1} s", start.elapsed().as_secs_f32()));
                     apps::prepare_desktop();
                     apps::follow_timezone(&tz);
+                    apps::stay_provisioned();
                     apps::spawn(link.clone(), 0, apps::Action::List);
                     apps::watch_packages(link.clone());
                     return;

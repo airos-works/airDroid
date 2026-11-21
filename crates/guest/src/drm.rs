@@ -27,6 +27,10 @@ const VIRTIO_GPU_CAPSET_VIRGL2: u64 = 2;
 
 pub struct Drm {
     fd: OwnedFd,
+    /// GEM handles in use and how many imports hold each: the kernel
+    /// gives one handle per dma-buf however often it is imported, and one
+    /// GEM_CLOSE drops it for all of them.
+    handles: std::sync::Mutex<std::collections::HashMap<u32, u32>>,
 }
 
 /// A virtio-gpu resource imported from a dma-buf, mapped (its guest
@@ -63,7 +67,7 @@ impl Drm {
             let p = crate::sys::cstr(format!("/dev/dri/renderD{n}"));
             let fd = unsafe { libc::open(p.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
             if fd >= 0 {
-                let drm = Drm { fd: unsafe { OwnedFd::from_raw_fd(fd) } };
+                let drm = Drm { fd: unsafe { OwnedFd::from_raw_fd(fd) }, handles: Default::default() };
                 // Our own virgl context, before any import: with
                 // context_init, importing a dma-buf does not create one,
                 // and resources are attached only to an existing context
@@ -81,34 +85,46 @@ impl Drm {
         Err(io::Error::new(io::ErrorKind::NotFound, "no virtio-gpu render node"))
     }
 
-    /// Imports `dmabuf` (plane 0 of a linear buffer) and maps its backing.
-    pub fn import(&self, dmabuf: &OwnedFd, width: u32, height: u32, stride: u32) -> io::Result<GpuBuffer> {
-        let fd = self.fd.as_raw_fd();
+    /// The GEM handle of `dmabuf` (the same one for the same buffer), held
+    /// until `unref_handle`.
+    pub fn handle_of(&self, dmabuf: &OwnedFd) -> io::Result<u32> {
         // struct drm_prime_handle { u32 handle; u32 flags; s32 fd; }
         let mut prime = [0u32; 3];
         prime[2] = dmabuf.as_raw_fd() as u32;
-        ioctl(fd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &mut prime)?;
-        let handle = prime[0];
+        let mut handles = self.handles.lock().unwrap();
+        ioctl(self.fd.as_raw_fd(), DRM_IOCTL_PRIME_FD_TO_HANDLE, &mut prime)?;
+        *handles.entry(prime[0]).or_insert(0) += 1;
+        Ok(prime[0])
+    }
+
+    pub fn unref_handle(&self, handle: u32) {
+        let mut handles = self.handles.lock().unwrap();
+        match handles.get_mut(&handle) {
+            Some(n) if *n > 1 => *n -= 1,
+            Some(_) => {
+                handles.remove(&handle);
+                self.close(handle);
+            }
+            None => {}
+        }
+    }
+
+    /// Maps the backing of a held handle (plane 0 of a linear buffer); the
+    /// buffer takes the caller's hold on the handle over (`release`).
+    pub fn map(&self, handle: u32, width: u32, height: u32, stride: u32) -> io::Result<GpuBuffer> {
+        let fd = self.fd.as_raw_fd();
         // struct drm_virtgpu_resource_info { bo_handle, res_handle, size, blob_mem }
         let mut info = [0u32; 4];
         info[0] = handle;
-        if let Err(e) = ioctl(fd, DRM_IOCTL_VIRTGPU_RESOURCE_INFO, &mut info) {
-            self.close(handle);
-            return Err(e);
-        }
+        ioctl(fd, DRM_IOCTL_VIRTGPU_RESOURCE_INFO, &mut info)?;
         let len = (info[2] as usize).max(stride as usize * height as usize);
         // struct drm_virtgpu_map { u64 offset; u32 handle; u32 pad; }
         let mut map = [0u64; 2];
         map[1] = handle as u64;
-        if let Err(e) = ioctl(fd, DRM_IOCTL_VIRTGPU_MAP, &mut map) {
-            self.close(handle);
-            return Err(e);
-        }
+        ioctl(fd, DRM_IOCTL_VIRTGPU_MAP, &mut map)?;
         let ptr = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, fd, map[0] as libc::off_t) };
         if ptr == libc::MAP_FAILED {
-            let e = io::Error::last_os_error();
-            self.close(handle);
-            return Err(e);
+            return Err(io::Error::last_os_error());
         }
         // the host reads these pages by physical address: fault every page
         // in (mlock skips this kind of driver mapping); virtio-gpu keeps
@@ -149,7 +165,7 @@ impl Drm {
         unsafe {
             libc::munmap(b.ptr as *mut libc::c_void, b.len);
         }
-        self.close(b.handle);
+        self.unref_handle(b.handle);
     }
 
     fn close(&self, handle: u32) {

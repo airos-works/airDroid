@@ -70,6 +70,9 @@ impl Drop for Pool {
 }
 
 /// Guest-physical ranges backing [addr, addr+len) of our address space.
+/// GPU buffers imported (not found in the cache), for the "held up" report.
+static IMPORTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn gpa_ranges(pagemap: &mut std::fs::File, addr: usize, len: usize) -> std::io::Result<Vec<GpaRange>> {
     const PAGE: usize = 4096;
     let mut out: Vec<GpaRange> = Vec::new();
@@ -187,6 +190,29 @@ struct Surface {
     feedbacks: Vec<wp_presentation_feedback::WpPresentationFeedback>,
 }
 
+/// What identifies an imported GPU buffer: its GEM handle (one per dma-buf)
+/// and how the client described it (width, height, stride, offset, format).
+type GpuKey = (u32, u32, u32, u32, u32, u32);
+
+/// An imported GPU buffer. Android's hardware composer makes a new
+/// wl_buffer of the same dma-buf for every frame ("Show Android" mode:
+/// for every layer); mapping it, reading its page map and describing it to
+/// the host each time (3 ms) is more than a frame's worth of work, so an
+/// import lives on a little after its last wl_buffer.
+struct GpuEntry {
+    g: Arc<crate::drm::GpuBuffer>,
+    host_id: u32,
+    /// wl_buffers on it
+    users: u32,
+    /// when the last one went
+    idle_ns: u64,
+}
+
+/// How long an import without a wl_buffer is kept.
+const GPU_IDLE_NS: u64 = 1_000_000_000;
+/// Imports without a wl_buffer kept at most.
+const GPU_IDLE_MAX: usize = 64;
+
 struct BufferInfo {
     host_id: u32,
     width: u32,
@@ -195,6 +221,8 @@ struct BufferInfo {
     _pool: Option<Arc<Pool>>,
     /// a virtio-gpu resource (dma-buf): read back before each frame
     gpu: Option<Arc<crate::drm::GpuBuffer>>,
+    /// its entry in the import cache
+    gpu_key: Option<GpuKey>,
     /// a 1x1 pool buffer: its colour, read at commit (backgrounds)
     solid: Option<*const u32>,
 }
@@ -246,6 +274,10 @@ pub struct State {
     drm: Option<crate::drm::Drm>,
     /// GPU buffers attached since the last frames went out
     readback: Vec<ObjectId>,
+    gpu_cache: HashMap<GpuKey, GpuEntry>,
+    /// destroyed wl_buffers a surface still shows (their contents stay
+    /// until the surface gets another buffer)
+    zombies: Vec<ObjectId>,
     /// (frames, total ns, longest ns, bytes) of GPU read-backs since the
     /// last report
     readback_stats: (u64, u64, u64, u64),
@@ -493,6 +525,60 @@ impl State {
             }
             if let Some(cs) = self.surfaces.get(c) {
                 self.collect_layers(c, x + cs.pos.0, y + cs.pos.1, out, solid);
+            }
+        }
+    }
+
+    /// Whether a surface shows the buffer.
+    fn shown(&self, id: &ObjectId) -> bool {
+        self.surfaces.values().any(|s| s.buffer.as_ref().is_some_and(|b| &b.id() == id))
+    }
+
+    /// Forgets a destroyed wl_buffer.
+    fn drop_buffer(&mut self, id: &ObjectId) {
+        if let Some(info) = self.buffers.remove(id) {
+            match info.gpu_key.and_then(|k| self.gpu_cache.get_mut(&k)) {
+                Some(e) => {
+                    e.users = e.users.saturating_sub(1);
+                    if e.users == 0 {
+                        e.idle_ns = sys::monotonic_ns();
+                    }
+                }
+                None => self.link.send(&ToHost::BufferDestroy { id: info.host_id }),
+            }
+        }
+        self.readback.retain(|x| x != id);
+    }
+
+    /// Destroyed buffers no surface shows any more, and imports unused for
+    /// a while (or too many of them).
+    fn expire_buffers(&mut self) {
+        if !self.zombies.is_empty() {
+            for id in std::mem::take(&mut self.zombies) {
+                if self.shown(&id) {
+                    self.zombies.push(id);
+                } else {
+                    self.drop_buffer(&id);
+                }
+            }
+        }
+        if self.gpu_cache.is_empty() {
+            return;
+        }
+        let now = sys::monotonic_ns();
+        let mut idle: Vec<(u64, GpuKey)> =
+            self.gpu_cache.iter().filter(|(_, e)| e.users == 0 && Arc::strong_count(&e.g) == 1).map(|(k, e)| (e.idle_ns, *k)).collect();
+        idle.sort_unstable();
+        let extra = idle.len().saturating_sub(GPU_IDLE_MAX);
+        for (i, (since, key)) in idle.into_iter().enumerate() {
+            if i >= extra && now.saturating_sub(since) < GPU_IDLE_NS {
+                break;
+            }
+            if let Some(e) = self.gpu_cache.remove(&key) {
+                self.link.send(&ToHost::BufferDestroy { id: e.host_id });
+                if let Some(drm) = &self.drm {
+                    drm.release(&e.g);
+                }
             }
         }
     }
@@ -1200,7 +1286,7 @@ impl Dispatch<wl_shm_pool::WlShmPool, ()> for State {
                 }
                 st.buffers.insert(
                     buffer.id(),
-                    BufferInfo { host_id, width: width as u32, height: height as u32, format: fmt, _pool: Some(p), gpu: None, solid },
+                    BufferInfo { host_id, width: width as u32, height: height as u32, format: fmt, _pool: Some(p), gpu: None, gpu_key: None, solid },
                 );
             }
             wl_shm_pool::Request::Resize { size } => {
@@ -1225,15 +1311,12 @@ impl Dispatch<wl_shm_pool::WlShmPool, ()> for State {
 impl Dispatch<wl_buffer::WlBuffer, ()> for State {
     fn request(_: &mut State, _: &Client, _: &wl_buffer::WlBuffer, _: wl_buffer::Request, _: &(), _: &DisplayHandle, _: &mut DataInit<'_, State>) {}
     fn destroyed(st: &mut State, _: ClientId, b: &wl_buffer::WlBuffer, _: &()) {
-        if let Some(info) = st.buffers.remove(&b.id()) {
-            st.link.send(&ToHost::BufferDestroy { id: info.host_id });
-            if let (Some(g), Some(drm)) = (info.gpu, &st.drm) {
-                if let Ok(g) = Arc::try_unwrap(g) {
-                    drm.release(&g);
-                }
-            }
+        let id = b.id();
+        if st.shown(&id) {
+            st.zombies.push(id);
+        } else {
+            st.drop_buffer(&id);
         }
-        st.readback.retain(|x| x != &b.id());
     }
 }
 
@@ -1711,30 +1794,50 @@ impl Dispatch<zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, DmabufParams> 
                     return;
                 };
                 let Some(drm) = &st.drm else { return };
-                let g = match drm.import(&fd, width as u32, height as u32, stride) {
-                    Ok(g) => Arc::new(g),
+                let handle = match drm.handle_of(&fd) {
+                    Ok(h) => h,
                     Err(e) => {
                         logf!("dma-buf import: {e}");
                         params.post_error(zwp_linux_buffer_params_v1::Error::InvalidWlBuffer, "import failed");
                         return;
                     }
                 };
-                st.next_buffer += 1;
-                let host_id = st.next_buffer;
-                let addr = g.ptr as usize + offset as usize;
-                let len = (stride as usize * height as usize).min(g.len.saturating_sub(offset as usize));
-                match gpa_ranges(&mut st.pagemap, addr, len) {
-                    Ok(ranges) => {
-                        st.link.send(&ToHost::BufferNew { id: host_id, width: width as u32, height: height as u32, stride, format: fmt, ranges });
-                        if st.present_host {
-                            st.link.send(&ToHost::BufferGpu { id: host_id, resource: g.res });
+                let key: GpuKey = (handle, width as u32, height as u32, stride, offset, fourcc);
+                let (host_id, g) = if let Some(e) = st.gpu_cache.get_mut(&key) {
+                    // the same buffer again: the entry holds the handle
+                    drm.unref_handle(handle);
+                    e.users += 1;
+                    (e.host_id, e.g.clone())
+                } else {
+                    let g = match drm.map(handle, width as u32, height as u32, stride) {
+                        Ok(g) => Arc::new(g),
+                        Err(e) => {
+                            drm.unref_handle(handle);
+                            logf!("dma-buf import: {e}");
+                            params.post_error(zwp_linux_buffer_params_v1::Error::InvalidWlBuffer, "import failed");
+                            return;
                         }
+                    };
+                    st.next_buffer += 1;
+                    let host_id = st.next_buffer;
+                    let addr = g.ptr as usize + offset as usize;
+                    let len = (stride as usize * height as usize).min(g.len.saturating_sub(offset as usize));
+                    match gpa_ranges(&mut st.pagemap, addr, len) {
+                        Ok(ranges) => {
+                            st.link.send(&ToHost::BufferNew { id: host_id, width: width as u32, height: height as u32, stride, format: fmt, ranges });
+                            if st.present_host {
+                                st.link.send(&ToHost::BufferGpu { id: host_id, resource: g.res });
+                            }
+                        }
+                        Err(e) => logf!("gpu buffer {host_id}: no guest-physical pages: {e}"),
                     }
-                    Err(e) => logf!("gpu buffer {host_id}: no guest-physical pages: {e}"),
-                }
+                    IMPORTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    st.gpu_cache.insert(key, GpuEntry { g: g.clone(), host_id, users: 1, idle_ns: 0 });
+                    (host_id, g)
+                };
                 st.buffers.insert(
                     buffer.id(),
-                    BufferInfo { host_id, width: width as u32, height: height as u32, format: fmt, _pool: None, gpu: Some(g), solid: None },
+                    BufferInfo { host_id, width: width as u32, height: height as u32, format: fmt, _pool: None, gpu: Some(g), gpu_key: Some(key), solid: None },
                 );
             }
             zwp_linux_buffer_params_v1::Request::Create { .. } => {
@@ -1807,6 +1910,8 @@ pub fn run(link: HostLink, inbox: Arc<Inbox>, socket: &str, out: OutputCfg) -> s
         pagemap: std::fs::File::open("/proc/self/pagemap")?,
         surfaces: HashMap::new(),
         buffers: HashMap::new(),
+        gpu_cache: HashMap::new(),
+        zombies: Vec::new(),
         pools: HashMap::new(),
         regions: HashMap::new(),
         viewports: HashMap::new(),
@@ -1874,10 +1979,29 @@ pub fn run(link: HostLink, inbox: Arc<Inbox>, socket: &str, out: OutputCfg) -> s
                 _ => {}
             }
         }
+        let t0 = sys::monotonic_ns();
         if let Err(e) = display.dispatch_clients(&mut st) {
             logf!("wayland dispatch: {e}");
         }
+        st.expire_buffers();
+        let t1 = sys::monotonic_ns();
         st.flush_frames();
+        let t2 = sys::monotonic_ns();
         let _ = display.flush_clients();
+        let t3 = sys::monotonic_ns();
+        // Android's composer gives up when its requests are not read for
+        // about a second: say where the loop was held up
+        if t3 - t0 > 200_000_000 {
+            crate::hostlink::console(&format!(
+                "airdroid: compositor held up {} ms (requests {} ms, frames {} ms, events {} ms); {} GPU buffers imported so far, {} kept, {} wl_buffers",
+                (t3 - t0) / 1_000_000,
+                (t1 - t0) / 1_000_000,
+                (t2 - t1) / 1_000_000,
+                (t3 - t2) / 1_000_000,
+                IMPORTS.load(std::sync::atomic::Ordering::Relaxed),
+                st.gpu_cache.len(),
+                st.buffers.len()
+            ));
+        }
     }
 }
