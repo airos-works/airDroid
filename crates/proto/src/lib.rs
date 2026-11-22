@@ -124,6 +124,10 @@ pub enum BootStage {
     /// The container exited.
     Stopped,
     Failed,
+    /// Android is not getting anywhere: its system server keeps dying, or
+    /// it has not come up in minutes. It may still boot (then Booted
+    /// follows).
+    Stuck,
 }
 
 /// What a launcher entry needs about an installed Android app.

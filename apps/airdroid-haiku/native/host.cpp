@@ -123,12 +123,14 @@ enum {
 	AD_ACT_TOGGLE_MULTIWINDOW = 7,
 	AD_ACT_SETTINGS = 8,		// opens the settings window
 	AD_ACT_SAVE_SETTINGS = 9,	// text: "key=value" lines
+	AD_ACT_NEW_DATA = 10,		// set Android's data aside, start with new
 };
 
 static const uint32 kMsgAction = 'adAc';
 static const uint32 kMsgAppInvoked = 'adAp';
 static const uint32 kMsgRemoveApp = 'adRm';
 static const uint32 kMsgPresent = 'adPr';
+static const uint32 kMsgNewData = 'adNd';
 
 
 // #pragma mark - event queue
@@ -677,6 +679,8 @@ public:
 		android->AddItem(new BMenuItem("Stop", _Action(AD_ACT_STOP)));
 		android->AddItem(new BMenuItem("Download Android again" B_UTF8_ELLIPSIS,
 			_Action(AD_ACT_SETUP)));
+		android->AddItem(new BMenuItem("Start With New Data" B_UTF8_ELLIPSIS,
+			new BMessage(kMsgNewData)));
 		android->AddSeparatorItem();
 		android->AddItem(new BMenuItem("Settings" B_UTF8_ELLIPSIS,
 			_Action(AD_ACT_SETTINGS), ','));
@@ -727,6 +731,26 @@ public:
 				AdEvent event = MakeEvent(AD_ACTION, 0);
 				message->FindInt32("action", &event.key);
 				Push(event);
+				break;
+			}
+			case kMsgNewData:
+			{
+				BAlert* alert = new BAlert("airDroid",
+					"Start Android with new data?\n\n"
+					"Android starts as it was at first: without the apps "
+					"installed since and without their data. Nothing is "
+					"deleted: what is there now is kept in a file next to "
+					"the new data (in config/non-packaged/data/airDroid), "
+					"and renaming that file back to userdata.qcow2 brings "
+					"it back.",
+					"Cancel", "Start With New Data", NULL,
+					B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+				alert->SetShortcut(0, B_ESCAPE);
+				if (alert->Go() == 1) {
+					AdEvent event = MakeEvent(AD_ACTION, 0);
+					event.key = AD_ACT_NEW_DATA;
+					Push(event);
+				}
 				break;
 			}
 			case kMsgAppInvoked:

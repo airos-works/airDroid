@@ -25,6 +25,11 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Zygote restarts before Android's start counts as stuck (a healthy
+/// start has none), and how long a start may take before it does.
+const STUCK_RESTARTS: u32 = 4;
+const STUCK_AFTER: Duration = Duration::from_secs(300);
+
 static PULSE: std::sync::OnceLock<Arc<pulse::Pulse>> = std::sync::OnceLock::new();
 
 fn status(link: &HostLink, stage: BootStage, detail: &str) {
@@ -308,10 +313,32 @@ fn boot(link: &HostLink, cfg: &container::Config, inbox: &Arc<compositor::Inbox>
         let tz = cfg.tz.clone();
         std::thread::spawn(move || {
             let start = std::time::Instant::now();
+            // Android's system server dying takes zygote with it, and init
+            // starts both again: a new zygote pid each time.
+            let mut zygote = String::new();
+            let mut restarts = 0;
+            let mut told = false;
             loop {
                 std::thread::sleep(Duration::from_millis(500));
                 if !exec::android_running() {
                     return;
+                }
+                let pid = exec::getprop("init.svc_debug_pid.zygote");
+                if !pid.is_empty() && pid != zygote {
+                    if !zygote.is_empty() {
+                        restarts += 1;
+                    }
+                    zygote = pid;
+                }
+                if !told && (restarts >= STUCK_RESTARTS || start.elapsed() > STUCK_AFTER) {
+                    told = true;
+                    let why = if restarts >= STUCK_RESTARTS {
+                        format!("its system server has died {restarts} times")
+                    } else {
+                        format!("not up after {} s", start.elapsed().as_secs())
+                    };
+                    logf!("Android is not coming up: {why}");
+                    status(&link, BootStage::Stuck, &why);
                 }
                 if exec::getprop("sys.boot_completed") == "1" {
                     let _ = multi;
