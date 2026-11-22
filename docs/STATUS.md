@@ -97,7 +97,9 @@ system update.
 * Started from a shell without a PATH the app could not download
   Android ("No such file or directory": curl); it now runs curl and
   unzip by where air/OS has them.
-* Vulkan (Venus) mode took the machine down: see the GPU plan.
+* Vulkan (Venus) mode took the machine down (airos-works/haiku#148):
+  see the GPU plan. The default mode started again afterwards with
+  Android's data intact.
 
 ## Host frame path (X399, 2026-11-21)
 
@@ -404,7 +406,8 @@ machine's Android after the hang above). airDroid now sets
       panicked as Android started in Venus mode ("rw_lock_read_unlock():
       lock ... not read-locked" in vm_soft_fault(), from the page fault
       of a QEMU disk thread's readv(): a read lock of QEMU's address
-      space had been released once too often by then). The check now
+      space had been released once too often by then;
+      airos-works/haiku#148). The check now
       lets only NVK through, where the mode has been run;
       `AIRDROID_VENUS_UNVERIFIED=1` in the app's environment lets any
       driver with the extensions through, to try one.
