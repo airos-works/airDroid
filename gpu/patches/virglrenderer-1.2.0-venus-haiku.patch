@@ -1,11 +1,12 @@
 --- a/server/main.c
 +++ b/server/main.c
-@@ -24,9 +24,96 @@
+@@ -24,9 +24,112 @@
   * from its start function.  In this case, render_context_main must be
   * thread-safe.
   */
 +#ifdef __HAIKU__
 +#include <stdio.h>
++#include <stdlib.h>
 +#include <string.h>
 +#include <vulkan/vulkan.h>
 +
@@ -76,8 +77,23 @@
 +            missing++;
 +         }
 +      }
-+      printf(missing ? "\n" : " ok\n");
-+      if (!missing)
++      /* Having the extensions was not enough on a Radeon 840M with RADV:
++       * the kernel panicked as Android started in Venus mode (a read lock
++       * of QEMU's address space released once too often, seen in a page
++       * fault of one of QEMU's disk threads). Until that is understood,
++       * only where it has been run: NVK. AIRDROID_VENUS_UNVERIFIED=1 lets
++       * any driver with the extensions through, to try one.
++       */
++      const bool verified = strstr(p.deviceName, "NVK") != NULL;
++      const char *any = getenv("AIRDROID_VENUS_UNVERIFIED");
++      const bool allowed = verified || (any && *any && *any != '0');
++      if (missing)
++         printf("\n");
++      else if (!allowed)
++         printf(" not verified with airDroid\n");
++      else
++         printf(" ok\n");
++      if (!missing && allowed)
 +         ret = 0;
 +   }
 +
