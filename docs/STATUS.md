@@ -147,7 +147,10 @@ then renames the data disk (`userdata.qcow2` becomes
 `~/config/non-packaged/data/airDroid`) and starts Android on a new one;
 nothing is deleted, and renaming the file back with Android stopped
 brings the old data back. Tried on the laptop with a user record
-damaged in a way the repair does not recognise.
+damaged in a way the repair does not recognise. `airdroid shell` and
+`airdroid logcat` answer from the moment Android's init runs (2 s into
+a start), not only once Android is up, to see what such a start dies
+of.
 
 ## An Intel machine (iMac, 2026-11-22): boots Android, then stops
 
