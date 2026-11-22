@@ -179,6 +179,13 @@ for airos-works/haiku#148), airDroid main as of this day:
   Android": 321-331 of 339-356 frames, 7-8 % janky.
 * Four minutes of scrolling in one go: 13546 frames, 0.44 % janky, the
   machine reachable throughout.
+* Those numbers are with all four hardware threads given to Android,
+  the default then. With two, the default since (all but two of the
+  host's threads, 2 to 8), everything is better on this machine: boot
+  19.1-21.6 s, Settings cold start 434-481 ms, the scroll test still
+  0-0.3 % janky, and "Show Android" 1.1 % janky instead of 8-11 % (3-5 %
+  with three). The host's side of a frame (QEMU's device threads, the
+  renderer, the app's compositor) needs CPUs of its own.
 * Vulkan (Venus) mode works with an i915_drm that has user pointer
   buffers (airos-works/haiku#150; a test build of it, 2026-11-23): the
   Godot editor on "Virtio-GPU Venus (Intel(R) Iris(R) Plus Graphics 640
