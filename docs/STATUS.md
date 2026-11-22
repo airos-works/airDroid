@@ -101,6 +101,24 @@ system update.
   see the GPU plan. The default mode started again afterwards with
   Android's data intact.
 
+## Android's data after a crash
+
+The guest checks the data disk (ext4) with e2fsck before it mounts it,
+as Android does with its own userdata. After a proper shutdown that is a
+look at the superblock (10 ms). If the VM went away with Android running
+(the host crashed or lost power, QEMU was killed), the journal is
+replayed and the whole file system checked once (0.3 s for a 1.2 GB data
+disk); what "-p" will not repair by itself is repaired with "-y" instead
+of leaving Android unable to start. Tested in the KVM loop: QEMU killed
+during a 300 MB write (journal replayed, clean), and a disk with a
+directory block overwritten and an inode cleared (repaired, Android
+booted). The console log has e2fsck's own lines.
+
+Not covered: damage to a file system that still says it is clean (a
+full check at every start would find it, at a second and more per
+start), and Android files that are intact as files but hold half a
+write.
+
 ## An Intel machine (iMac, 2026-11-22): boots Android, then stops
 
 i5-7360U (2 cores, 4 threads), 8 GB, Iris Plus 640 on i915_drm, air/OS
