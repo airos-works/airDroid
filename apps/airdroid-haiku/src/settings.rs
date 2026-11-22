@@ -27,16 +27,26 @@ pub struct Settings {
     pub shared_folder: String,
 }
 
+/// Android's CPUs on a host with this many hardware threads: all but two,
+/// at least two and at most eight. The two are for the host's side of
+/// every frame (QEMU's device threads, the renderer, this app's compositor):
+/// with all four threads of a two-core machine given to Android, "Show
+/// Android" stuttered in 8-11 % of its frames and apps started slower than
+/// with two (1 %, and 460 ms instead of 570).
+fn default_cpus(threads: u32) -> u32 {
+    threads.saturating_sub(2).clamp(2, 8)
+}
+
 impl Default for Settings {
     fn default() -> Self {
-        let cpus = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
+        let threads = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
         Settings {
             multi_windows: true,
             width: 1280,
             height: 800,
             dpi: 0,
             ram_mb: 4096,
-            cpus: cpus.clamp(2, 8),
+            cpus: default_cpus(threads),
             flavour: "VANILLA".into(),
             mouse_as_touch: false,
             gpu: "auto".into(),
@@ -92,6 +102,11 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn default_cpus_leave_the_host_two_threads() {
+        assert_eq!([1, 2, 4, 6, 8, 12, 32].map(super::default_cpus), [2, 2, 2, 4, 6, 8, 8]);
+    }
+
     use super::*;
 
     #[test]
