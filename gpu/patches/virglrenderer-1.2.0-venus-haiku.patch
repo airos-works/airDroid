@@ -1,6 +1,6 @@
 --- a/server/main.c
 +++ b/server/main.c
-@@ -24,9 +24,112 @@
+@@ -24,9 +24,252 @@
   * from its start function.  In this case, render_context_main must be
   * thread-safe.
   */
@@ -18,6 +18,134 @@
 + * Android's own lavapipe would at least draw them on the CPU: the caller
 + * then leaves Venus off. Prints one line per device; 0 when one will do.
 + */
++/* What Venus does with the device as soon as an app starts, tried here:
++ * fences and semaphores that can be exported as sync files (the guest's
++ * driver makes every fence of an app that way), and an import of host
++ * memory. A driver can list the extensions and still fail these (ANV on
++ * Kaby Lake with i915_drm, 2026-11: no exportable fence). Returns NULL
++ * when all of it works, else what did not.
++ */
++static const char *
++vk_probe(VkPhysicalDevice phys, VkResult *result)
++{
++   static const char *const exts[] = {
++      "VK_KHR_external_fence_fd",
++      "VK_KHR_external_semaphore_fd",
++      "VK_EXT_external_memory_host",
++   };
++   const float priority = 1.0f;
++   const VkDeviceQueueCreateInfo queue = {
++      .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
++      .queueFamilyIndex = 0,
++      .queueCount = 1,
++      .pQueuePriorities = &priority,
++   };
++   const VkDeviceCreateInfo dev_info = {
++      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
++      .queueCreateInfoCount = 1,
++      .pQueueCreateInfos = &queue,
++      .enabledExtensionCount = sizeof(exts) / sizeof(exts[0]),
++      .ppEnabledExtensionNames = exts,
++   };
++   VkDevice dev;
++   *result = vkCreateDevice(phys, &dev_info, NULL, &dev);
++   if (*result != VK_SUCCESS)
++      return "no device";
++
++   const char *failed = NULL;
++
++   const VkExportFenceCreateInfo fence_export = {
++      .sType = VK_STRUCTURE_TYPE_EXPORT_FENCE_CREATE_INFO,
++      .handleTypes = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT,
++   };
++   const VkFenceCreateInfo fence_info = {
++      .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
++      .pNext = &fence_export,
++   };
++   VkFence fence;
++   *result = vkCreateFence(dev, &fence_info, NULL, &fence);
++   if (*result == VK_SUCCESS)
++      vkDestroyFence(dev, fence, NULL);
++   else
++      failed = "no fence that exports a sync file";
++
++   if (!failed) {
++      const VkExportSemaphoreCreateInfo sem_export = {
++         .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
++         .handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
++      };
++      const VkSemaphoreCreateInfo sem_info = {
++         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
++         .pNext = &sem_export,
++      };
++      VkSemaphore sem;
++      *result = vkCreateSemaphore(dev, &sem_info, NULL, &sem);
++      if (*result == VK_SUCCESS)
++         vkDestroySemaphore(dev, sem, NULL);
++      else
++         failed = "no semaphore that exports a sync file";
++   }
++
++   if (!failed) {
++      VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_props = {
++         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT,
++      };
++      VkPhysicalDeviceProperties2 props2 = {
++         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
++         .pNext = &host_props,
++      };
++      vkGetPhysicalDeviceProperties2(phys, &props2);
++      VkDeviceSize align = host_props.minImportedHostPointerAlignment;
++      if (align < 4096)
++         align = 4096;
++      const VkDeviceSize size = align > 65536 ? align : 65536;
++      void *mem = NULL;
++      PFN_vkGetMemoryHostPointerPropertiesEXT get_props =
++         (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(
++            dev, "vkGetMemoryHostPointerPropertiesEXT");
++      VkMemoryHostPointerPropertiesEXT ptr_props = {
++         .sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT,
++      };
++      if (!get_props || posix_memalign(&mem, align, size) != 0) {
++         *result = VK_ERROR_OUT_OF_HOST_MEMORY;
++         failed = "no host memory import";
++      } else {
++         memset(mem, 0, size);
++         *result = get_props(dev,
++                             VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
++                             mem, &ptr_props);
++         if (*result == VK_SUCCESS && !ptr_props.memoryTypeBits)
++            *result = VK_ERROR_FORMAT_NOT_SUPPORTED;
++         if (*result == VK_SUCCESS) {
++            uint32_t type = 0;
++            while (!(ptr_props.memoryTypeBits & (1u << type)))
++               type++;
++            const VkImportMemoryHostPointerInfoEXT import = {
++               .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
++               .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
++               .pHostPointer = mem,
++            };
++            const VkMemoryAllocateInfo alloc = {
++               .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
++               .pNext = &import,
++               .allocationSize = size,
++               .memoryTypeIndex = type,
++            };
++            VkDeviceMemory memory;
++            *result = vkAllocateMemory(dev, &alloc, NULL, &memory);
++            if (*result == VK_SUCCESS)
++               vkFreeMemory(dev, memory, NULL);
++         }
++         if (*result != VK_SUCCESS)
++            failed = "no import of host memory";
++      }
++      free(mem);
++   }
++
++   vkDestroyDevice(dev, NULL);
++   return failed;
++}
++
 +static int
 +vk_check(void)
 +{
@@ -77,24 +205,36 @@
 +            missing++;
 +         }
 +      }
-+      /* Only the drivers the mode has been run on with airDroid: NVK (a
-+       * GTX 1070) and RADV (a Radeon 840M). The extensions say what a
-+       * driver offers, not that guest memory imported as host memory and
-+       * shared with a VM works with it. AIRDROID_VENUS_UNVERIFIED=1 lets
-+       * any driver with the extensions through, to try one.
++      /* The drivers the mode has been run on with airDroid pass: NVK (a
++       * GTX 1070) and RADV (a Radeon 840M). Any other needs
++       * AIRDROID_VENUS_UNVERIFIED=1 to be tried, and then has to do what
++       * vk_probe() tries; for those two its result is only told, in case
++       * the probe asks more than Venus does.
 +       */
 +      const bool verified = strstr(p.deviceName, "NVK") != NULL
 +         || strstr(p.deviceName, "RADV") != NULL;
 +      const char *any = getenv("AIRDROID_VENUS_UNVERIFIED");
-+      const bool allowed = verified || (any && *any && *any != '0');
-+      if (missing)
++      const bool asked = any && *any && *any != '0';
++      if (missing) {
 +         printf("\n");
-+      else if (!allowed)
-+         printf(" not verified with airDroid\n");
-+      else
-+         printf(" ok\n");
-+      if (!missing && allowed)
++         continue;
++      }
++      VkResult probe_result = VK_SUCCESS;
++      const char *failed = vk_probe(devs[i], &probe_result);
++      if (verified) {
++         if (failed)
++            printf(" ok (though: %s, VkResult %d)\n", failed, (int)probe_result);
++         else
++            printf(" ok\n");
 +         ret = 0;
++      } else if (failed) {
++         printf(" %s (VkResult %d)\n", failed, (int)probe_result);
++      } else if (asked) {
++         printf(" ok (not verified with airDroid, allowed by AIRDROID_VENUS_UNVERIFIED)\n");
++         ret = 0;
++      } else {
++         printf(" not verified with airDroid\n");
++      }
 +   }
 +
 +   vkDestroyInstance(instance, NULL);
