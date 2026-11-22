@@ -156,7 +156,98 @@ pub fn mount_data_disk(on_format: impl FnOnce()) -> io::Result<()> {
     for d in ["data", "overlay_rw/system", "overlay_rw/vendor", "overlay_work/system", "overlay_work/vendor"] {
         sys::mkdir_p(&format!("{DATA_DISK}/{d}"), 0o755)?;
     }
+    let started = std::time::Instant::now();
+    let (seen, repaired) = clear_zeroed_state(std::path::Path::new(&format!("{DATA_DISK}/data")));
+    if repaired > 0 {
+        logf!("data disk: {repaired} of {seen} state files held only zeros ({} ms)", started.elapsed().as_millis());
+    }
     Ok(())
+}
+
+/// Whether a file has something in it and all of it is zero bytes.
+fn all_zeros(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let mut buf = [0u8; 65536];
+    let mut any = false;
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => return any,
+            Ok(n) => {
+                if buf[..n].iter().any(|&b| b != 0) {
+                    return false;
+                }
+                any = true;
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+fn xml_files(dir: &std::path::Path, depth: u32, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else { continue };
+        if kind.is_dir() {
+            if depth > 0 {
+                xml_files(&path, depth - 1, out);
+            }
+        } else if kind.is_file() && path.extension().is_some_and(|e| e == "xml") {
+            out.push(path);
+        }
+    }
+}
+
+/// Android's state files (XML, text or binary) that hold nothing but zero
+/// bytes: what a crash of the host can leave of a file written just
+/// before it (its size made it to the disk, its contents did not). Android
+/// treats most of them as damaged and starts over with defaults, but not
+/// all: with a zeroed users/0.xml there is no user, no app is installed for
+/// anyone, and the system server dies at every start ("There must be
+/// exactly one installer").
+///
+/// No valid file is all zeros, so nothing is lost by taking them away:
+/// Android's own copy is put in their place where it keeps one
+/// (settings_*.xml.fallback), the others it writes anew. A zeroed user
+/// record takes the list of users with it, from which Android would
+/// otherwise still expect that user; it then sets up the first user again,
+/// whose apps and data stay.
+///
+/// Returns how many files were looked at and how many repaired.
+pub fn clear_zeroed_state(data: &std::path::Path) -> (usize, usize) {
+    let mut files = Vec::new();
+    for (dir, depth) in [("system", 2), ("system_de", 2), ("system_ce", 2), ("misc_de", 4)] {
+        xml_files(&data.join(dir), depth, &mut files);
+    }
+    let users = data.join("system/users");
+    let mut repaired = 0;
+    for path in &files {
+        // 4 MiB: none of these files is anywhere near that
+        if !std::fs::metadata(path).is_ok_and(|m| m.len() > 0 && m.len() <= 4 << 20) || !all_zeros(path) {
+            continue;
+        }
+        let name = path.strip_prefix(data).unwrap_or(path).display().to_string();
+        let fallback = std::path::PathBuf::from(format!("{}.fallback", path.display()));
+        if fallback.exists() && !all_zeros(&fallback) && std::fs::metadata(&fallback).is_ok_and(|m| m.len() > 0) {
+            // copy, keeping the owner and mode of the file Android made
+            match std::fs::read(&fallback).and_then(|bytes| std::fs::write(path, bytes)) {
+                Ok(()) => logf!("data disk: {name} held only zeros, put back from its fallback copy"),
+                Err(e) => logf!("data disk: {name} held only zeros, its fallback copy: {e}"),
+            }
+        } else {
+            match std::fs::remove_file(path) {
+                Ok(()) => logf!("data disk: {name} held only zeros, removed"),
+                Err(e) => logf!("data disk: {name} held only zeros: {e}"),
+            }
+            if path.parent() == Some(users.as_path()) && path.file_name().is_some_and(|n| n != "userlist.xml") {
+                let _ = std::fs::remove_file(users.join("userlist.xml"));
+                logf!("data disk: the list of users goes with it, Android sets the first user up again");
+            }
+        }
+        repaired += 1;
+    }
+    (files.len(), repaired)
 }
 
 fn mount_image(serial: &str, at: &str) -> io::Result<()> {
@@ -581,4 +672,40 @@ pub fn set_persistent_props(props: &[(&str, &str)]) -> io::Result<()> {
     std::fs::write(&tmp, &out)?;
     sys::chmod(&tmp, 0o600)?;
     std::fs::rename(&tmp, &path)
+}
+
+#[cfg(test)]
+mod zeroed_tests {
+    use super::*;
+
+    #[test]
+    fn zeroed_state_files_are_cleared() {
+        let dir = std::env::temp_dir().join(format!("airdroid-zeroed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let users = dir.join("system/users");
+        std::fs::create_dir_all(users.join("0")).unwrap();
+        std::fs::write(users.join("0.xml"), [0u8; 330]).unwrap();
+        std::fs::write(users.join("userlist.xml"), b"ABX\0users").unwrap();
+        std::fs::write(users.join("0/settings_global.xml"), [0u8; 9000]).unwrap();
+        std::fs::write(users.join("0/settings_global.xml.fallback"), b"ABX\0settings").unwrap();
+        std::fs::write(users.join("0/settings_secure.xml"), b"ABX\0fine").unwrap();
+        std::fs::write(dir.join("system/netpolicy.xml"), [0u8; 149]).unwrap();
+        std::fs::write(dir.join("system/empty.xml"), b"").unwrap();
+        std::fs::write(dir.join("system/packages.xml"), b"ABX\0packages").unwrap();
+        std::fs::write(dir.join("system/zeros.bin"), [0u8; 64]).unwrap();
+
+        let (seen, repaired) = clear_zeroed_state(&dir);
+        assert_eq!((seen, repaired), (7, 3));
+        assert!(!users.join("0.xml").exists());
+        assert!(!users.join("userlist.xml").exists());
+        assert_eq!(std::fs::read(users.join("0/settings_global.xml")).unwrap(), b"ABX\0settings");
+        assert_eq!(std::fs::read(users.join("0/settings_secure.xml")).unwrap(), b"ABX\0fine");
+        assert!(!dir.join("system/netpolicy.xml").exists());
+        assert!(dir.join("system/empty.xml").exists());
+        assert!(dir.join("system/packages.xml").exists());
+        assert!(dir.join("system/zeros.bin").exists());
+        // nothing left to do the second time
+        assert_eq!(clear_zeroed_state(&dir).1, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
