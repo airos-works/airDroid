@@ -442,18 +442,20 @@ machine's Android after the hang above). airDroid now sets
       stderr says why). NVK on the GTX 1070 passes; lavapipe of Mesa
       22 (the test VM) does not: there Vulkan apps found no
       VK_KHR_swapchain and failed to start before the check existed.
-      Having the extensions is not enough: on a Radeon 840M with RADV
-      (a Framework laptop, 2026-11-22) the check passed and the kernel
-      panicked as Android started in Venus mode ("rw_lock_read_unlock():
-      lock ... not read-locked" in vm_soft_fault(), from the page fault
-      of a QEMU disk thread's readv(): a read lock of QEMU's address
-      space had been released once too often by then;
-      airos-works/haiku#148). The check now
-      lets only NVK through, where the mode has been run;
+      The check lets only NVK through for now, the one driver the mode
+      has run on. The first try on another (a Radeon 840M with RADV, a
+      Framework laptop, 2026-11-22) passed the check and ended in the
+      kernel panic of airos-works/haiku#148 as Android started. That
+      panic has since been reproduced in the default mode on the X399
+      and is the NVMM driver's (see "The kernel panic under airDroid"),
+      so it says nothing against RADV; the mode is to be tried again on
+      RADV and on Intel's ANV once the kernel fix is in, and the
+      restriction dropped for what works.
       `AIRDROID_VENUS_UNVERIFIED=1` in the app's environment lets any
       driver with the extensions through, to try one.
-      Open: that panic; one render server crash early on was not seen
-      again and not explained.
+      Open: one render server crash early on was not seen again. With
+      that kernel bug a thread's wait for a lock can fail in any
+      process, which would explain it, but nothing was kept of it.
       A third-party app: the Godot 4.3 editor (its Android APK has
       x86_64 code) started with `--rendering-method mobile
       --rendering-driver vulkan` reports "Vulkan 1.3.325 - Forward
