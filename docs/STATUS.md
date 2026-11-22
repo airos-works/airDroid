@@ -103,36 +103,42 @@ does not mark opaque 6.7 -> 1.7 ms. Android's own
 frame times (median 10-20 ms, 0.3-1.2 % janky) come from Android and
 virgl, not the host path.
 
-## Against Waydroid (X399, 2026-11-21)
+## Against Waydroid (X399, 2026-11-22)
 
-airDroid's side, default mode (virgl, 8 processors and 4 GB for
-Android, LineageOS 20.0-20260927 VANILLA, 1920x1080, GTX 1070 through
-Zink on NVK on NVIDIA's resource manager):
+The same machine (Threadripper, GTX 1070, 1920x1080 at 60 Hz), the same
+Android (LineageOS 20.0-20260927 VANILLA, Waydroid's image), Settings in
+its own window (488x848 here, 464x824 there), the same commands.
 
-| | airDroid on air/OS |
-|---|---|
-| Android boot (start to `sys.boot_completed`) | 19.2 s (21 s from starting the app) |
-| Settings cold start (`am start -W`, TotalTime) | 471-486 ms |
-| Clock cold start | 580 ms (WaitTime 587-818 ms) |
-| Scroll test (6 swipe pairs in Settings) | 305-331 frames, 0.3-0.7 % janky, every one on screen (302-326 host frames) |
-| Frame time, median / 90th / 99th percentile | 5-11 / 11-13 / 16-19 ms (8-26 / 20-29 / 22-48 ms before the fence fix below) |
-| airDroid's own CPU time for the test | 94-107 ms |
+| | airDroid 0.1.0-111 on air/OS | Waydroid 1.6.3 on Linux |
+|---|---|---|
+| How Android runs | a VM (QEMU on NVMM), 8 processors, 4 GB | a container on the host's kernel, 32 processors, 64 GB |
+| Android's OpenGL | virgl: Zink on NVK on NVIDIA's resource manager | Mesa nouveau (NV134), at the card's boot clocks |
+| Android boot, start to `sys.boot_completed` | 19.1 / 19.2 / 19.8 s (21-23 s from starting the app) | 12.6 / 12.6 / 12.6 s |
+| Settings cold start, `am start -W` TotalTime | 487 / 487 / 512 ms | 177-217 ms (six starts) |
+| Scroll test: frames | 327-331 in 5-6 s, 324-325 of them on screen | 479-486 in 8.1 s |
+| janky frames | 0 - 0.6 % | 0 % |
+| frame time (gfxinfo), median / 90th / 99th | 10-12 / 13-17 / 16-25 ms | 5 / 5 / 5 ms (the histogram's floor) |
+| vsync to frame done (framestats), median / 90th | 4.5 / 6.5 ms (one run of three: 12.1 / 14.7) | 1.5-1.9 / 2.0-2.4 ms |
+| The presenting side's CPU time for the test | airDroid: 73-75 ms | Weston: 120-150 ms |
+| Android's side's CPU time for the test | QEMU: 7.1-8.5 s | the container: 1.6-1.9 s |
 
-Measure with the app's window on screen: start it once with
-`airdroid app launch` (a bare `am start` leaves `waydroid.active_apps`
-unset, the hardware composer then shows nothing, and frame times come
-out at 5-6 ms because nothing is presented; a first version of this
-table had that mistake).
+Both show every frame at 60 a second. Waydroid starts Android in two
+thirds of the time, starts an app in 40 % of the time and finishes a
+frame 3 ms sooner; Android's work costs four to six times the CPU time
+here. That is the price of the virtual machine (air/OS has no Linux
+kernel to share with a container) and of OpenGL going through virgl.
+What airDroid itself does for a frame costs no more than Weston's part.
 
-Waydroid's side on the same machine: not measured yet. The attempt
-(2026-11-21) was to boot a Linux live image from the lab KVM's virtual
-media; the KVM's USB link to the X399 is not connected (its gadget
-reads "not attached", the X399 lists no such USB device), so the image
-never reached the firmware. With that cable in, mount the rescue image
-as a CD and repeat the same three measurements under Waydroid. Expect
-the graphics numbers to say more about nouveau than about Waydroid:
-on Linux this GTX 1070 has only nouveau, which cannot raise the card's
-clocks; boot and app start are the fair part.
+Not the same on both sides: Waydroid had all 32 processors and 64 GB
+and its images and data in RAM (a live system); its boot time was
+polled every 0.47 s; nouveau ran the GTX 1070 at boot clocks, which
+this light load did not show (GPU percentiles 1 ms); with software
+rendering instead, Waydroid's numbers were 14.4 s, 594-614 ms, and
+14.7-15.0 s of CPU time in the Settings app for the scroll test.
+
+More processors do not help airDroid: with 16 and 8 GB, Android boots
+in 30 s, Settings starts in 745-893 ms and 7-17 % of the scroll's
+frames are janky. 8 is the default.
 
 ## Where a frame's time went (X399, 2026-11-22)
 
