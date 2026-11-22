@@ -354,7 +354,11 @@ machine's Android after the hang above). airDroid now sets
       that had run the scroll test was quit and the next one started;
       again no text (the loader does reserve the fixed log buffer on
       this machine, the restart does not keep it). Both times a session
-      that had done real GPU work was ending and the next beginning. The default mode is unchanged by all this (X399:
+      that had done real GPU work was ending and the next beginning.
+      16 such hand-overs in the test VM (software GL, the same kernel
+      and NVMM driver, where a panic would show) went through, which
+      points at the GPU side of the X399 (nvidia_rm, NVK) rather than
+      at NVMM. The default mode is unchanged by all this (X399:
       19.7 s to boot, 94 ms for the scroll test).
    Tried earlier on Linux/KVM with lavapipe (QEMU on Xvfb, SDL GL):
    Android enumerates the Venus device and the render server starts,
