@@ -97,9 +97,12 @@ system update.
 * Started from a shell without a PATH the app could not download
   Android ("No such file or directory": curl); it now runs curl and
   unzip by where air/OS has them.
-* Vulkan (Venus) mode took the machine down (airos-works/haiku#148):
-  see the GPU plan. The default mode started again afterwards with
-  Android's data intact.
+* Vulkan (Venus) mode took the machine down at the first try
+  (airos-works/haiku#148, a kernel fault). On a kernel with the fix
+  it works: see the GPU plan.
+* A later stop of the machine with Android running (the same fault)
+  left Android unable to start; see "Android's data after a crash".
+  With the repair there it boots in 11 s on the same data disk.
 
 ## Android's data after a crash
 
@@ -477,15 +480,16 @@ machine's Android after the hang above). airDroid now sets
       stderr says why). NVK on the GTX 1070 passes; lavapipe of Mesa
       22 (the test VM) does not: there Vulkan apps found no
       VK_KHR_swapchain and failed to start before the check existed.
-      The check lets only NVK through for now, the one driver the mode
-      has run on. The first try on another (a Radeon 840M with RADV, a
-      Framework laptop, 2026-11-22) passed the check and ended in the
-      kernel panic of airos-works/haiku#148 as Android started. That
-      panic has since been reproduced in the default mode on the X399
-      and is the NVMM driver's (see "The kernel panic under airDroid"),
-      so it says nothing against RADV; the mode is to be tried again on
-      RADV and on Intel's ANV once the kernel fix is in, and the
-      restriction dropped for what works.
+      The check lets through the drivers the mode has been run on: NVK
+      (GTX 1070, X399) and RADV (Radeon 840M, Framework laptop,
+      2026-11-22 on a kernel with the fix for airos-works/haiku#148:
+      the Godot editor on "Virtio-GPU Venus (AMD Radeon 840M Graphics
+      (RADV GFX1152))", Vulkan 1.4.307, in its own window and in "Show
+      Android"; the Settings scroll test there 297-317 of 301-321
+      frames on screen, 0.9-3.7 % janky, a frame read out of the GPU
+      in 1.5 ms). The first try on RADV, before that fix, had ended in
+      that kernel panic, which had nothing to do with the driver.
+      Intel's ANV passes the extension check and has not been run.
       `AIRDROID_VENUS_UNVERIFIED=1` in the app's environment lets any
       driver with the extensions through, to try one.
       Open: one render server crash early on was not seen again. With
