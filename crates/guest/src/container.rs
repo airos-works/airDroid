@@ -86,11 +86,63 @@ fn has_ext4(dev: &str) -> bool {
     f.seek(SeekFrom::Start(1024 + 0x38)).is_ok() && f.read_exact(&mut magic).is_ok() && magic == [0x53, 0xEF]
 }
 
+/// e2fsck's exit code: a set of flags.
+const FSCK_UNCORRECTED: i32 = 4;
+
+fn e2fsck(dev: &str, args: &[&str]) -> i32 {
+    match sys::spawn(std::process::Command::new("/sbin/e2fsck").args(args).arg(dev)) {
+        Ok(mut child) => sys::wait_child(&mut child),
+        Err(e) => {
+            logf!("e2fsck {dev}: {e}");
+            0
+        }
+    }
+}
+
+/// Whether the file system was in use when the VM last stopped: its
+/// journal still has to be replayed (EXT4_FEATURE_INCOMPAT_RECOVER).
+fn was_in_use(dev: &str) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(dev) else { return false };
+    let mut incompat = [0u8; 4];
+    f.seek(SeekFrom::Start(1024 + 0x60)).is_ok()
+        && f.read_exact(&mut incompat).is_ok()
+        && u32::from_le_bytes(incompat) & 0x4 != 0
+}
+
+/// Checks the data disk before it is mounted, as Android does with its
+/// own userdata. Shut down properly it is clean and this costs a few
+/// milliseconds. If the VM went away with Android running (the host
+/// crashed or lost power, QEMU was killed) the journal is replayed and
+/// everything is checked once: writes Android thought were on the disk
+/// may not be, which the journal cannot know and a file system marked
+/// clean does not show (about a second for a small disk). "-p" repairs
+/// what is safe to repair without asking, and what that leaves is
+/// answered with yes rather than left to keep Android from starting.
+fn check_data_disk(dev: &str) {
+    let started = std::time::Instant::now();
+    let unclean = was_in_use(dev);
+    let mut code = e2fsck(dev, if unclean { &["-f", "-p"] } else { &["-p"] });
+    if code >= FSCK_UNCORRECTED {
+        logf!("data disk: errors a plain check does not repair (e2fsck exit {code}), repairing");
+        code = e2fsck(dev, &["-f", "-y"]);
+    }
+    let ms = started.elapsed().as_millis();
+    let how = if unclean { "checked in full after an unclean stop" } else { "clean" };
+    match code {
+        0 => logf!("data disk: {how} ({ms} ms)"),
+        1..=3 => logf!("data disk: errors repaired (e2fsck exit {code}, {ms} ms)"),
+        _ => logf!("data disk: e2fsck could not repair it (exit {code}, {ms} ms)"),
+    }
+}
+
 /// Mounts the data disk, formatting it on first start.
 pub fn mount_data_disk(on_format: impl FnOnce()) -> io::Result<()> {
     let dev = disk_by_serial("userdata")
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no userdata disk"))?;
-    if !has_ext4(&dev) {
+    if has_ext4(&dev) {
+        check_data_disk(&dev);
+    } else {
         on_format();
         logf!("formatting {dev} (first start)");
         let mut child = sys::spawn(std::process::Command::new("/sbin/mke2fs").args(["-q", "-F", "-t", "ext4", "-L", "airdroid-data", &dev]))?;
