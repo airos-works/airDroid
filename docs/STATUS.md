@@ -116,8 +116,8 @@ its own window (488x848 here, 464x824 there), the same commands.
 | Android boot, start to `sys.boot_completed` | 14.8 / 14.9 / 16.9 s (16-19 s from starting the app) | 12.6 / 12.6 / 12.6 s |
 | Settings cold start, `am start -W` TotalTime | 312 / 335 / 338 ms | 177-217 ms (six starts) |
 | Scroll test: frames | 290-320 in 5-6 s, all but 1-4 of them on screen | 479-486 in 8.1 s |
-| janky frames | 0 - 0.3 % (nine runs) | 0 % |
-| frame time (gfxinfo), median / 90th / 99th | 5 / 5-10 / 5-12 ms (two runs of nine: 7-18 / 18-20 / 20-28) | 5 / 5 / 5 ms (the histogram's floor) |
+| janky frames | 0 % (eight runs; 0 - 0.3 % in nine earlier ones) | 0 % |
+| frame time (gfxinfo), median / 90th / 99th | 5 / 5-10 / 5-11 ms | 5 / 5 / 5 ms (the histogram's floor) |
 | vsync to frame done (framestats), median / 90th | 3.8 / 4.7 ms (one run of three: 25 / 26) | 1.5-1.9 / 2.0-2.4 ms |
 | The presenting side's CPU time for the test | airDroid: 75-83 ms | Weston: 120-150 ms |
 | Android's side's CPU time for the test | QEMU: 4.4-5.2 s | the container: 1.6-1.9 s |
