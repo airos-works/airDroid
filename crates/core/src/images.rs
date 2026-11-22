@@ -61,15 +61,34 @@ struct Channel {
     response: Vec<Build>,
 }
 
+/// A command line tool by where air/OS has it: the app may have been started
+/// without a PATH (from a service, or a shell that has none), and "curl"
+/// alone is then "No such file or directory". Elsewhere, and if it is not
+/// there, by name.
+fn tool(name: &str) -> Command {
+    for dir in ["/boot/system/bin", "/bin"] {
+        let path = Path::new(dir).join(name);
+        if cfg!(target_os = "haiku") && path.exists() {
+            return Command::new(path);
+        }
+    }
+    Command::new(name)
+}
+
+/// "No such file or directory" alone does not say what is missing.
+fn could_not_run(name: &str, e: io::Error) -> io::Error {
+    io::Error::new(e.kind(), format!("cannot run {name}: {e}"))
+}
+
 fn curl() -> Command {
-    let mut c = Command::new("curl");
+    let mut c = tool("curl");
     c.args(["-fsSL", "--retry", "3", "--connect-timeout", "20"]);
     c
 }
 
 /// The newest build listed on a channel.
 pub fn latest(ota_url: &str) -> io::Result<Build> {
-    let out = curl().arg(ota_url).stderr(Stdio::piped()).output()?;
+    let out = curl().arg(ota_url).stderr(Stdio::piped()).output().map_err(|e| could_not_run("curl", e))?;
     if !out.status.success() {
         return Err(io::Error::other(format!(
             "{ota_url}: {}",
@@ -115,7 +134,8 @@ pub fn download(build: &Build, dir: &Path, label: &str, progress: Progress, canc
         .arg(&build.url)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(|e| could_not_run("curl", e))?;
     loop {
         if let Some(st) = child.try_wait()? {
             if !st.success() {
@@ -148,7 +168,7 @@ pub fn download(build: &Build, dir: &Path, label: &str, progress: Progress, canc
 
 /// Extracts `member` (system.img / vendor.img) from a zip into `dir`.
 pub fn extract(zip: &Path, member: &str, dir: &Path) -> io::Result<PathBuf> {
-    let st = Command::new("unzip").args(["-o", "-qq"]).arg(zip).arg(member).arg("-d").arg(dir).status()?;
+    let st = tool("unzip").args(["-o", "-qq"]).arg(zip).arg(member).arg("-d").arg(dir).status().map_err(|e| could_not_run("unzip", e))?;
     if !st.success() {
         return Err(io::Error::other(format!("unzip {} failed", zip.display())));
     }
