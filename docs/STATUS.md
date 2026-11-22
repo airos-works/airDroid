@@ -109,25 +109,29 @@ The same machine (Threadripper, GTX 1070, 1920x1080 at 60 Hz), the same
 Android (LineageOS 20.0-20260927 VANILLA, Waydroid's image), Settings in
 its own window (488x848 here, 464x824 there), the same commands.
 
-| | airDroid 0.1.0-111 on air/OS | Waydroid 1.6.3 on Linux |
+| | airDroid on air/OS | Waydroid 1.6.3 on Linux |
 |---|---|---|
 | How Android runs | a VM (QEMU on NVMM), 8 processors, 4 GB | a container on the host's kernel, 32 processors, 64 GB |
 | Android's OpenGL | virgl: Zink on NVK on NVIDIA's resource manager | Mesa nouveau (NV134), at the card's boot clocks |
-| Android boot, start to `sys.boot_completed` | 19.1 / 19.2 / 19.8 s (21-23 s from starting the app) | 12.6 / 12.6 / 12.6 s |
-| Settings cold start, `am start -W` TotalTime | 487 / 487 / 512 ms | 177-217 ms (six starts) |
-| Scroll test: frames | 327-331 in 5-6 s, 324-325 of them on screen | 479-486 in 8.1 s |
-| janky frames | 0 - 0.6 % | 0 % |
-| frame time (gfxinfo), median / 90th / 99th | 10-12 / 13-17 / 16-25 ms | 5 / 5 / 5 ms (the histogram's floor) |
-| vsync to frame done (framestats), median / 90th | 4.5 / 6.5 ms (one run of three: 12.1 / 14.7) | 1.5-1.9 / 2.0-2.4 ms |
-| The presenting side's CPU time for the test | airDroid: 73-75 ms | Weston: 120-150 ms |
-| Android's side's CPU time for the test | QEMU: 7.1-8.5 s | the container: 1.6-1.9 s |
+| Android boot, start to `sys.boot_completed` | 14.8 / 14.9 / 16.9 s (16-19 s from starting the app) | 12.6 / 12.6 / 12.6 s |
+| Settings cold start, `am start -W` TotalTime | 312 / 335 / 338 ms | 177-217 ms (six starts) |
+| Scroll test: frames | 290-320 in 5-6 s, all but 1-4 of them on screen | 479-486 in 8.1 s |
+| janky frames | 0 - 0.3 % (nine runs) | 0 % |
+| frame time (gfxinfo), median / 90th / 99th | 5 / 5-10 / 5-12 ms (two runs of nine: 7-18 / 18-20 / 20-28) | 5 / 5 / 5 ms (the histogram's floor) |
+| vsync to frame done (framestats), median / 90th | 3.8 / 4.7 ms (one run of three: 25 / 26) | 1.5-1.9 / 2.0-2.4 ms |
+| The presenting side's CPU time for the test | airDroid: 75-83 ms | Weston: 120-150 ms |
+| Android's side's CPU time for the test | QEMU: 4.4-5.2 s | the container: 1.6-1.9 s |
 
-Both show every frame at 60 a second. Waydroid starts Android in two
-thirds of the time, starts an app in 40 % of the time and finishes a
-frame 3 ms sooner; Android's work costs four to six times the CPU time
-here. That is the price of the virtual machine (air/OS has no Linux
-kernel to share with a container) and of OpenGL going through virgl.
-What airDroid itself does for a frame costs no more than Weston's part.
+Both show every frame at 60 a second. Waydroid starts Android 2 to 4 s
+sooner, starts an app in 60 % of the time and finishes a frame 2 ms
+sooner; Android's work costs about three times the CPU time here. That
+is the price of the virtual machine (air/OS has no Linux kernel to
+share with a container) and of OpenGL going through virgl. What
+airDroid itself does for a frame costs less than Weston's part.
+
+The first measurement of the day (0.1.0-111) had 19.1-19.8 s, 487-512
+ms, 7.1-8.5 s of CPU time and 0-0.6 % janky frames; see "Timer ticks
+and the vsync Android is told" below for what changed.
 
 Not the same on both sides: Waydroid had all 32 processors and 64 GB
 and its images and data in RAM (a live system); its boot time was
@@ -136,9 +140,42 @@ this light load did not show (GPU percentiles 1 ms); with software
 rendering instead, Waydroid's numbers were 14.4 s, 594-614 ms, and
 14.7-15.0 s of CPU time in the Settings app for the scroll test.
 
-More processors do not help airDroid: with 16 and 8 GB, Android boots
-in 30 s, Settings starts in 745-893 ms and 7-17 % of the scroll's
-frames are janky. 8 is the default.
+## Timer ticks and the vsync Android is told (X399, 2026-11-22)
+
+With Android idle QEMU's main thread used 16 % of a processor, nearly
+all of it in the kernel, while the guest's processors did nothing. The
+guest's APIC is emulated in QEMU: every timer tick of every busy
+processor is a timer in QEMU's main thread, an interrupt injected and
+that processor's thread kicked. The x86 defconfig ticks 1000 times a
+second; the guest kernel now does 250, as Android's own kernels do.
+
+| guest ticks | Android boot | Settings cold start | QEMU CPU, scroll test | QEMU main thread, idle |
+|---|---|---|---|---|
+| 1000 Hz | 19.1-19.8 s | 487-512 ms | 7.1-8.5 s | 1.6 s in 10 s |
+| 250 Hz | 14.8-16.9 s | 312-338 ms | 4.4-5.2 s | 0.5 s in 10 s |
+| 100 Hz | 14.8 s | | 3.5-4.1 s | |
+
+At 250 Hz alone 5-13 % of the scroll test's frames were janky (0.3-0.6 %
+at 1000 Hz), at 4 ms and at 10 ms ticks alike, with any scheduler
+setting. It was a matter of phase: Android's composer takes the
+presentation time it is told as a vsync and plans its next frames from
+it. The host shows a frame at its display's vertical blank and answers
+then; told that time as it is, Android's next frame arrives just after
+a blank and waits most of a refresh for the one after (a frame was back
+from the host after 8 ms on average), and how late exactly depended on
+the tick. The guest now reports the presentation 72 % of a refresh
+(12 ms at 60 Hz) before the host's answer, so Android's frame arrives a
+few milliseconds before the blank: back in 4.3-6.1 ms, and no janky
+frame in nine runs with a lead between 11.5 and 13 ms (some at 10 and
+at 14.5 ms). `/var/lib/airdroid/vsync-lead` on the data disk
+(microseconds) overrides it, to tune another display or machine; the
+guest logs "frames: 300 to the host and back in ..." to judge by.
+
+More than 8 processors make things worse: with 16 and 8 GB (at 1000
+Hz) Android booted in 30 s and 7-17 % of the frames were janky.
+
+"Show Android" mode with both: 323 of 338-341 frames on screen, 2-3.6 %
+janky (30-39 % before); in Vulkan mode 10-12.5 %.
 
 ## Where a frame's time went (X399, 2026-11-22)
 
