@@ -152,24 +152,32 @@ damaged in a way the repair does not recognise. `airdroid shell` and
 a start), not only once Android is up, to see what such a start dies
 of.
 
-## An Intel machine (iMac, 2026-11-22): boots Android, then stops
+## An Intel machine (iMac, 2026-11-22)
 
-i5-7360U (2 cores, 4 threads), 8 GB, Iris Plus 640 on i915_drm, air/OS
-hrev60207+2823; airDroid 0.1.0-127 unpacked into a folder and run from
-there (the machine was in a System Updater fallback state, so installed
-packages did not show).
+i5-7360U (2 cores, 4 threads), 8 GB, Iris Plus 640 on i915_drm (virgl on
+Mesa's iris), a 1920x1080 display. Android runs with 4 CPUs and 4 GB.
 
-* The first start downloaded Android and booted it (VMX with EPT on real
-  hardware; `airdroid status` said "Android is running (10 apps)").
-* Both starts ended with the whole machine stopped within a minute (no
-  ping, nothing on screen; the owner restarted it): about half a minute
-  after the first boot, and 23 s after the second start (2 vCPUs, 2 GB,
-  4.6 GB of memory free a few seconds before), just after Android's
-  compositor connected.
-* Nothing was captured there. It is probably the kernel panic below,
-  which more preemption of QEMU's threads brings out, and four hardware
-  threads give plenty of that. No measurements yet; to be repeated when
-  that is fixed.
+On air/OS 20261122-0832 (hrev60207+2851, the first release with the fix
+for airos-works/haiku#148), airDroid main as of this day:
+
+* Boot: 21.0-21.6 s (24 s from starting the app). Settings cold start:
+  564-587 ms.
+* Scroll test: 301-322 of 304-324 frames on screen, none janky, median
+  5 ms; airDroid's CPU time 85-90 ms, QEMU's 10.7-10.9 s (it has all four
+  hardware threads); a frame read out of the GPU in 1.5 ms. "Show
+  Android": 321-331 of 339-356 frames, 7-8 % janky.
+* Four minutes of scrolling in one go: 13546 frames, 0.44 % janky, the
+  machine reachable throughout.
+* Vulkan (Venus) mode is refused there, with the reason: ANV cannot
+  import host memory on i915_drm, which has no userptr
+  (airos-works/haiku#150). Tried with the check overridden, Android got
+  its Vulkan device and the first Vulkan app died creating a fence.
+  Selected in the settings, the mode falls back to OpenGL and Android's
+  own lavapipe for Vulkan apps.
+
+Before that fix (hrev60207+2823) the same machine stopped dead within a
+minute of each of two starts, with nothing on screen and no ping: the
+kernel fault described next, which four hardware threads bring out fast.
 
 ## The kernel panic under airDroid (airos-works/haiku#148, #147)
 
@@ -184,14 +192,15 @@ very likely this. Not airDroid's or QEMU's bug to fix; the reproduction
 is `tools/lab/race.sh` (airDroid, Settings scrolling, N busy loops) and the
 `kdl_capture` debugger add-on records the panic.
 
-The probable cause: the NVMM driver's os_preempt_disable() counted
+Fixed in Haiku 28034134c6 (release 20261122-0832): the laptop, the X399
+and the iMac run airDroid on it without it. The cause: the NVMM driver's os_preempt_disable() counted
 "do not reschedule" on a CPU the thread may have left a moment before
 (preempted between looking the CPU up and counting). That CPU then
 never switches threads again, and a thread there that wants to block
-just carries on. A first patch is in Haiku 82ca96ec04; it has not run
-on a machine yet (the X399 kept using its packaged driver beside the
-patched non-packaged one, so those runs say nothing about it), and the
-fix is being reworked and tested under #148.
+just carries on. It only happens with two hardware threads per core
+(the sibling picks the preempted thread up): a test VM with one thread
+per core never showed it, with two the unpatched driver took the kernel
+down in two runs of three of a stress test (100 s and 700 s in).
 
 ## Host frame path (X399, 2026-11-21)
 
@@ -405,9 +414,8 @@ machine's Android after the hang above). airDroid now sets
 * ARM64 (Waydroid's arm64 images and QEMU under TCG would work but slowly;
   no NVMM there).
 * AMD hosts: see "On real hardware" above.
-* Not yet verified on hardware: a real microphone, and any Intel machine
-  (an Intel iMac boots Android but the machine then stops, see "An
-  Intel machine"; the VMX/EPT path is otherwise verified in nested VMs).
+* Not yet verified on hardware: a real microphone. Vulkan mode has run
+  on NVIDIA (NVK) and AMD (RADV), not on Intel (see "An Intel machine").
 
 ## GPU plan
 
@@ -502,9 +510,13 @@ machine's Android after the hang above). airDroid now sets
       frames on screen, 0.9-3.7 % janky, a frame read out of the GPU
       in 1.5 ms). The first try on RADV, before that fix, had ended in
       that kernel panic, which had nothing to do with the driver.
-      Intel's ANV passes the extension check and has not been run.
-      `AIRDROID_VENUS_UNVERIFIED=1` in the app's environment lets any
-      driver with the extensions through, to try one.
+      The check also tries what Venus does first with a device: a
+      fence and a semaphore that export sync files, and an import of
+      host memory. Intel's ANV (Iris Plus 640, i915_drm) lists every
+      extension and fails the import (no userptr in i915_drm,
+      airos-works/haiku#150), so the mode stays off there and says why.
+      `AIRDROID_VENUS_UNVERIFIED=1` in the app's environment lets a
+      driver that is not NVK or RADV through if it passes those tries.
       Open: one render server crash early on was not seen again. With
       that kernel bug a thread's wait for a lock can fail in any
       process, which would explain it, but nothing was kept of it.
