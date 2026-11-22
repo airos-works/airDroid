@@ -128,6 +128,9 @@ pub struct Engine {
     install_baseline: Option<Vec<String>>,
     app_path: String,
     quitting: bool,
+    /// The guest has started Android's init: `airdroid shell` and `logcat`
+    /// can look at a start that does not finish.
+    android_started: bool,
     /// QEMU runs (its handle may be with the stop thread): quitting waits
     /// for it, so the app never leaves a VM behind.
     qemu_alive: bool,
@@ -169,6 +172,7 @@ impl Engine {
             announce_new_apps: false,
             install_baseline: None,
             quitting: false,
+            android_started: false,
             qemu_alive: false,
             epoch: Instant::now(),
             cancel_setup: Arc::new(AtomicBool::new(false)),
@@ -276,7 +280,9 @@ impl Engine {
             }
             let _ = control::write_frame(conn, control::EXIT, &code.to_le_bytes());
         };
-        match req {
+// a shell is there before Android is: the way to see why a start hangs
+        let early = matches!(req, R::Shell { .. }) && self.phase == Phase::Starting && self.android_started;
+                match req {
             R::Status => {
                 let text = match self.phase {
                     Phase::NotInstalled => "Android is not installed".to_string(),
@@ -332,7 +338,7 @@ impl Engine {
                 self.request(Pending::Install(PathBuf::from(path)));
                 finish(&mut conn, "Android is starting; the app is installed when it is up.", 0);
             }
-            _ if self.phase != Phase::Booted => finish(&mut conn, "Android is not running", 1),
+            _ if self.phase != Phase::Booted && !early => finish(&mut conn, "Android is not running", 1),
             R::Install { path } => {
                 if let Some(req) = self.request(Pending::Install(PathBuf::from(path))) {
                     self.waiters.insert(req, conn);
@@ -551,6 +557,7 @@ impl Engine {
         self.present = cfg.present_socket().map(Present::new);
         self.vm = Some(cfg);
         self.phase = Phase::Starting;
+        self.android_started = false;
         self.epoch = Instant::now();
     }
 
@@ -708,7 +715,11 @@ impl Engine {
             }
             ToHost::Log { text } if debug() => eprintln!("airDroid: guest: {text}"),
             ToHost::Status { stage, detail } => match stage {
-                BootStage::Init | BootStage::StartingAndroid => self.status("Starting Android…"),
+                BootStage::Init => self.status("Starting Android…"),
+                BootStage::StartingAndroid => {
+                    self.android_started = true;
+                    self.status("Starting Android…");
+                }
                 BootStage::FormattingData => self.status("Preparing Android's storage (first start)…"),
                 BootStage::Booted => {
                     self.phase = Phase::Booted;
