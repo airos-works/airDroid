@@ -120,10 +120,11 @@ struct SrcRect {
 
 /// How much earlier than a frame's answer from the host its presentation is
 /// reported to Android, in percent of a refresh (see frame_done()). Measured
-/// on a 60 Hz display: between 11.5 and 13 ms no frame of the scroll test is
-/// late and a frame is back from the host in 5 ms; at 10 ms and at 14.5 ms
-/// some are late, with none it is 8 ms and up to 10 % late frames.
-const VSYNC_LEAD_PERCENT: u64 = 72;
+/// on a 60 Hz display with an app window: between 11.5 and 13 ms no frame of
+/// the scroll test is late and a frame is back from the host in 5 ms; at 10
+/// and at 14.5 ms some are late; with none it is 8 ms and up to 10 % late
+/// frames.
+const VSYNC_LEAD_PERCENT: i64 = 72;
 
 /// Damage that covers a surface whatever its size.
 const WHOLE_SURFACE: Rect = Rect::new(0, 0, 1 << 24, 1 << 24);
@@ -306,8 +307,10 @@ pub struct State {
     /// frames answered, ns in all, the longest, how many took over 8 ms
     frame_stats: (u64, u64, u64, u64),
     /// how much earlier than a frame's answer its presentation is said to
-    /// have been (see frame_done()), if not VSYNC_LEAD_PERCENT of a refresh
+    /// have been (see frame_done()), fixed (the vsync-lead file)
     vsync_lead_ns: Option<u64>,
+    /// since the last log line: the slack reported in all (ns), frames late
+    slack_stats: (i64, u64),
     /// airdroid.present=host: the host has QEMU read GPU buffers itself
     present_host: bool,
     out: OutputCfg,
@@ -679,7 +682,7 @@ impl State {
                 if let Some(f) = &w.in_flight {
                     if now.saturating_sub(f.sent_ns) > 1_000_000_000 {
                         let serial = f.serial;
-                        self.frame_done(wid, serial, now);
+                        self.frame_done(wid, serial, airdroid_proto::NO_SLACK);
                     }
                 }
             }
@@ -734,7 +737,7 @@ impl State {
         }
     }
 
-    fn frame_done(&mut self, wid: u32, serial: u32, _host_ns: u64) {
+    fn frame_done(&mut self, wid: u32, serial: u32, slack_ns: i64) {
         let t = self.time_ms();
         let now = sys::monotonic_ns();
         let refresh_ns = if self.out.refresh_mhz > 0 { (1_000_000_000_000u64 / self.out.refresh_mhz as u64) as u32 } else { 16_666_666 };
@@ -751,12 +754,15 @@ impl State {
             st.3 += (dt > 8_000_000) as u64;
             if st.0 == 300 {
                 logf!(
-                    "frames: 300 to the host and back in {:.2} ms on average, {:.2} ms at most, {} over 8 ms",
+                    "frames: 300 to the host and back in {:.2} ms on average, {:.2} ms at most, {} over 8 ms; ready {:.2} ms before the host's tick on average, {} too late for it",
                     st.1 as f64 / 300.0 / 1e6,
                     st.2 as f64 / 1e6,
-                    st.3
+                    st.3,
+                    self.slack_stats.0 as f64 / 300.0 / 1e6,
+                    self.slack_stats.1
                 );
                 *st = (0, 0, 0, 0);
+                self.slack_stats = (0, 0);
             }
         }
         for b in f.release {
@@ -770,8 +776,17 @@ impl State {
         // blank and answers then: said as it is, Android's next frame
         // arrives just after a blank and waits most of a refresh for the
         // one after. Said a little earlier, it arrives before the blank.
-        let lead = self.vsync_lead_ns.unwrap_or(refresh_ns as u64 * VSYNC_LEAD_PERCENT / 100);
-        let shown = now.saturating_sub(lead);
+        let period = refresh_ns as i64;
+        let lead = self.vsync_lead_ns.map_or(period * VSYNC_LEAD_PERCENT / 100, |fixed| fixed as i64);
+        // (Steering the lead by the host's slack was tried: aimed at 4 ms
+        // of slack it settles near 15 ms, where more frames are late than
+        // at 12. The slack is only logged.)
+        if slack_ns != airdroid_proto::NO_SLACK {
+            let st = &mut self.slack_stats;
+            st.0 += slack_ns.clamp(-period, period);
+            st.1 += (slack_ns < 0) as u64;
+        }
+        let shown = now.saturating_sub(lead as u64);
         let secs = shown / 1_000_000_000;
         for fb in f.feedbacks {
             if let Some(o) = output.as_ref().filter(|o| o.id().same_client_as(&fb.id())) {
@@ -1999,7 +2014,8 @@ pub fn run(link: HostLink, inbox: Arc<Inbox>, socket: &str, out: OutputCfg) -> s
         readback: Vec::new(),
         readback_stats: (0, 0, 0, 0),
         frame_stats: (0, 0, 0, 0),
-        // (a file on the data disk, in microseconds, to try other values)
+        slack_stats: (0, 0),
+        // (a file on the data disk, in microseconds, to fix it)
         vsync_lead_ns: std::fs::read_to_string(format!("{}/vsync-lead", crate::container::DATA_DISK))
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
@@ -2059,7 +2075,7 @@ pub fn run(link: HostLink, inbox: Arc<Inbox>, socket: &str, out: OutputCfg) -> s
         let msgs = std::mem::take(&mut *inbox.queue.lock().unwrap());
         for m in msgs {
             match m {
-                ToGuest::FrameDone { window, serial, time_ns } => st.frame_done(window, serial, time_ns),
+                ToGuest::FrameDone { window, serial, slack_ns } => st.frame_done(window, serial, slack_ns),
                 ToGuest::PointerMotion { window, x, y } => st.pointer_motion(window, x as f64, y as f64),
                 ToGuest::PointerButton { button, pressed, .. } => st.pointer_button(button, pressed),
                 ToGuest::PointerAxis { dx, dy, discrete_x, discrete_y, .. } => st.pointer_axis(dx as f64, dy as f64, discrete_x, discrete_y),

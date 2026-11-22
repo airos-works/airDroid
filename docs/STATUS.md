@@ -169,13 +169,20 @@ few milliseconds before the blank: back in 4.3-6.1 ms, and no janky
 frame in nine runs with a lead between 11.5 and 13 ms (some at 10 and
 at 14.5 ms). `/var/lib/airdroid/vsync-lead` on the data disk
 (microseconds) overrides it, to tune another display or machine; the
-guest logs "frames: 300 to the host and back in ..." to judge by.
+guest logs "frames: 300 to the host and back in ..." to judge by, with
+how long before its tick the host had each frame ready (the host says
+so in `FrameDone`). Steering the lead by that figure was tried and is
+worse: aimed at 4 ms it settles near 15 ms of lead with 0.3-2 % janky
+frames, and "Show Android" mode needs more than a tick for a frame at
+any lead. With the fixed lead, eight more runs: no janky frame, 5 / 5-10
+/ 5-11 ms.
 
 More than 8 processors make things worse: with 16 and 8 GB (at 1000
 Hz) Android booted in 30 s and 7-17 % of the frames were janky.
 
-"Show Android" mode with both: 323 of 338-341 frames on screen, 2-3.6 %
-janky (30-39 % before); in Vulkan mode 10-12.5 %.
+"Show Android" mode with both: 314-327 of 327-341 frames on screen,
+2-6 % janky in most runs and 20 % in one (30-39 % before); in Vulkan
+mode 7-12.5 %.
 
 ## Where a frame's time went (X399, 2026-11-22)
 
