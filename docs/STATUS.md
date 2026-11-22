@@ -114,10 +114,27 @@ during a 300 MB write (journal replayed, clean), and a disk with a
 directory block overwritten and an inode cleared (repaired, Android
 booted). The console log has e2fsck's own lines.
 
+The file system being sound is not enough. On the Framework laptop,
+after the host stopped dead with Android running (2026-11-22, the kernel
+fault of #148), e2fsck found nothing and Android still never finished
+starting: four small files Android had written in its last second were
+there with their sizes and nothing but zero bytes in them, among them
+`/data/system/users/0.xml`. Without it there is no user, no app is
+installed for anyone, and the system server dies at every start ("There
+must be exactly one installer; found []", every five seconds). So the
+guest also looks at Android's XML state files (37 on that disk, 27 ms)
+before Android starts: one that holds only zeros is replaced by
+Android's own fallback copy where it keeps one (settings_*.xml) and
+removed otherwise, and a zeroed user record takes the list of users
+with it, so that Android sets its first user up again (apps and their
+data stay). With that the laptop's disk, as the crash left it, boots in
+24 s with its apps. No valid file is all zeros, so nothing is lost.
+
 Not covered: damage to a file system that still says it is clean (a
 full check at every start would find it, at a second and more per
-start), and Android files that are intact as files but hold half a
-write.
+start), and Android files that hold half a write rather than none.
+There is no way yet to set a data disk aside from the app and start
+with a new one if Android does not come up.
 
 ## An Intel machine (iMac, 2026-11-22): boots Android, then stops
 
