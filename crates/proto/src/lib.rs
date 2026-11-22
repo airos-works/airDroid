@@ -21,6 +21,9 @@ use std::io::{self, Read, Write};
 /// versions (they ship together, in one package).
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// [`ToGuest::FrameDone`]'s `slack_ns` when the host does not measure it.
+pub const NO_SLACK: i64 = i64::MIN;
+
 /// virtio-serial port name the guest looks for under /sys/class/virtio-ports.
 pub const PORT_NAME: &str = "works.airos.airdroid.0";
 
@@ -304,12 +307,14 @@ pub enum ToGuest {
         refresh_mhz: u32,
         dpi: u32,
     },
-    /// The host has consumed `serial` for `window` at `time_ns`
-    /// (CLOCK_MONOTONIC of the host; only differences matter).
+    /// The host has consumed `serial` for `window`: it answers at its
+    /// display's pace, on a tick. `slack_ns` is how long before that tick
+    /// the frame was ready (negative: so much too late for it, and answered
+    /// on a later one); [`NO_SLACK`] if the host does not say.
     FrameDone {
         window: u32,
         serial: u32,
-        time_ns: u64,
+        slack_ns: i64,
     },
     PointerMotion {
         window: u32,

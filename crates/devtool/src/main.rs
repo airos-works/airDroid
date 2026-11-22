@@ -281,7 +281,7 @@ fn main() {
         if Instant::now() >= next_vsync {
             let t = start.elapsed().as_nanos() as u64;
             for (window, serial) in pending_done.drain(..) {
-                let _ = session.send(&ToGuest::FrameDone { window, serial, time_ns: t });
+                let _ = session.send(&ToGuest::FrameDone { window, serial, slack_ns: airdroid_core::proto::NO_SLACK });
             }
             next_vsync += Duration::from_micros(16_667);
             if next_vsync < Instant::now() {

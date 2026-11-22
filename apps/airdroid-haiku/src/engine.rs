@@ -114,7 +114,9 @@ pub struct Engine {
     present: Option<Present>,
     windows: HashMap<u32, Win>,
     pending: Vec<Pending>,
-    frames_done: Vec<(u32, u32)>,
+    /// frames to answer on the next tick: window, serial, and how long
+    /// before that tick each was ready (ns; negative: too late for it)
+    frames_done: Vec<(u32, u32, i64)>,
     next_vsync: Instant,
     modifiers: u32,
     apps: Vec<AppInfo>,
@@ -945,7 +947,13 @@ impl Engine {
                         }
                     }
                 }
-                self.frames_done.push((window, serial));
+                // ready this long before the tick that was due when it came
+                let now = Instant::now();
+                let slack = match self.next_vsync.checked_duration_since(now) {
+                    Some(early) => early.as_nanos() as i64,
+                    None => -(now.duration_since(self.next_vsync).as_nanos() as i64),
+                };
+                self.frames_done.push((window, serial, slack));
             }
             ToHost::Cursor { window, buffer, .. } => host::window_hide_cursor(window, buffer.is_some()),
             ToHost::Apps { apps } => self.set_apps(apps),
@@ -1031,10 +1039,9 @@ impl Engine {
         if self.frames_done.is_empty() {
             return;
         }
-        let t = self.epoch.elapsed().as_nanos() as u64;
         if let Some(s) = &self.session {
-            for (window, serial) in self.frames_done.drain(..) {
-                let _ = s.send(&ToGuest::FrameDone { window, serial, time_ns: t });
+            for (window, serial, slack_ns) in self.frames_done.drain(..) {
+                let _ = s.send(&ToGuest::FrameDone { window, serial, slack_ns });
             }
         } else {
             self.frames_done.clear();
