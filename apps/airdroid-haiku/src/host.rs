@@ -54,6 +54,7 @@ pub mod action {
     pub const TOGGLE_MULTIWINDOW: i32 = 7;
     pub const SETTINGS: i32 = 8;
     pub const SAVE_SETTINGS: i32 = 9;
+    pub const NEW_DATA: i32 = 10;
 }
 
 /// An event with its text payload (paths, arguments, clipboard text).

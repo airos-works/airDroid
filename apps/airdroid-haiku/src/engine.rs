@@ -719,6 +719,9 @@ impl Engine {
                 }
                 BootStage::Stopped => self.status("Android stopped."),
                 BootStage::Failed => self.status(&format!("Android failed to start: {detail}")),
+                BootStage::Stuck => self.status(&format!(
+                    "Android is not coming up ({detail}). Stop it, then try Start With New Data in the Android menu."
+                )),
             },
             ToHost::Log { .. } => {}
             ToHost::BufferNew { id, width, height, stride, format, ranges } => {
@@ -1269,6 +1272,20 @@ impl Engine {
                         host::alert("airDroid", "Stop Android before downloading it again.");
                     }
                 }
+                action::NEW_DATA => {
+                    if self.session.is_some() {
+                        host::alert("airDroid", "Stop Android before starting it with new data.");
+                    } else {
+                        match set_data_aside(&self.paths.userdata()) {
+                            Ok(Some(kept)) => {
+                                self.status(&format!("Android's data so far is kept as {kept}. Starting with new data…"));
+                                self.start_vm();
+                            }
+                            Ok(None) => self.start_vm(),
+                            Err(e) => host::alert("airDroid", &format!("Android's data could not be set aside: {e}")),
+                        }
+                    }
+                }
                 action::TOGGLE_MULTIWINDOW => {
                     self.settings.multi_windows = !self.settings.multi_windows;
                     self.settings.save(&self.paths.settings);
@@ -1352,4 +1369,69 @@ fn window_title(title: &str, app_id: &str, apps: &[AppInfo]) -> String {
 
 fn sanitize(name: &str) -> String {
     name.chars().map(|c| if c == '/' || c == ':' { '-' } else { c }).collect()
+}
+
+/// Year, month, day, hour, minute, second (UTC) of seconds since 1970.
+fn utc(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
+    let days = (secs / 86400) as i64;
+    let rem = (secs % 86400) as u32;
+    // civil from days (Howard Hinnant's algorithm)
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    (y, m, d, rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
+/// Renames Android's data disk so that the next start makes a new one:
+/// "userdata.qcow2" becomes "userdata-20261122-081500.qcow2" beside it.
+/// Nothing is deleted; renaming it back (with Android stopped) brings the
+/// old data back. Returns the new name, or None if there was no disk.
+fn set_data_aside(userdata: &std::path::Path) -> std::io::Result<Option<String>> {
+    if !userdata.exists() {
+        return Ok(None);
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let (y, mo, d, h, mi, s) = utc(now);
+    let stem = userdata.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "userdata".into());
+    let mut name = format!("{stem}-{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}.qcow2");
+    let mut n = 1;
+    while userdata.with_file_name(&name).exists() {
+        n += 1;
+        name = format!("{stem}-{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}-{n}.qcow2");
+    }
+    std::fs::rename(userdata, userdata.with_file_name(&name))?;
+    Ok(Some(name))
+}
+
+#[cfg(test)]
+mod data_aside_tests {
+    use super::*;
+
+    #[test]
+    fn dates_from_seconds() {
+        assert_eq!(utc(0), (1970, 1, 1, 0, 0, 0));
+        assert_eq!(utc(951782400), (2000, 2, 29, 0, 0, 0));
+        assert_eq!(utc(1795335300), (2026, 11, 22, 8, 15, 0));
+    }
+
+    #[test]
+    fn data_is_renamed_not_deleted() {
+        let dir = std::env::temp_dir().join(format!("airdroid-aside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let disk = dir.join("userdata.qcow2");
+        assert_eq!(set_data_aside(&disk).unwrap(), None);
+        std::fs::write(&disk, b"old").unwrap();
+        let kept = set_data_aside(&disk).unwrap().unwrap();
+        assert!(kept.starts_with("userdata-2") && kept.ends_with(".qcow2"));
+        assert!(!disk.exists());
+        assert_eq!(std::fs::read(dir.join(&kept)).unwrap(), b"old");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

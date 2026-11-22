@@ -136,8 +136,18 @@ data stay). With that the laptop's disk, as the crash left it, boots in
 Not covered: damage to a file system that still says it is clean (a
 full check at every start would find it, at a second and more per
 start), and Android files that hold half a write rather than none.
-There is no way yet to set a data disk aside from the app and start
-with a new one if Android does not come up.
+
+If Android still does not come up, the app says so: the guest counts
+the restarts of Android's zygote (its system server dying takes it
+along) and reports a start as stuck after four of them, or after five
+minutes ("Android is not coming up (its system server has died 4
+times)", 28 s into such a start). *Android > Start With New Data...*
+then renames the data disk (`userdata.qcow2` becomes
+`userdata-20261122-084031.qcow2` beside it, in
+`~/config/non-packaged/data/airDroid`) and starts Android on a new one;
+nothing is deleted, and renaming the file back with Android stopped
+brings the old data back. Tried on the laptop with a user record
+damaged in a way the repair does not recognise.
 
 ## An Intel machine (iMac, 2026-11-22): boots Android, then stops
 
