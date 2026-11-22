@@ -180,9 +180,10 @@ any lead. With the fixed lead, eight more runs: no janky frame, 5 / 5-10
 More than 8 processors make things worse: with 16 and 8 GB (at 1000
 Hz) Android booted in 30 s and 7-17 % of the frames were janky.
 
-"Show Android" mode with both: 314-327 of 327-341 frames on screen,
-2-6 % janky in most runs and 20 % in one (30-39 % before); in Vulkan
-mode 7-12.5 %.
+"Show Android" mode with both: 287-327 of 302-352 frames on screen,
+2-13 % janky from run to run and 20 % in one (30-39 % before); in
+Vulkan mode 7-12.5 %. A frame takes the host about 10 ms there, most of
+a tick, so it depends on how the frames happen to fall.
 
 ## Where a frame's time went (X399, 2026-11-22)
 
