@@ -101,6 +101,41 @@ system update.
   see the GPU plan. The default mode started again afterwards with
   Android's data intact.
 
+## An Intel machine (iMac, 2026-11-22): boots Android, then stops
+
+i5-7360U (2 cores, 4 threads), 8 GB, Iris Plus 640 on i915_drm, air/OS
+hrev60207+2823; airDroid 0.1.0-127 unpacked into a folder and run from
+there (the machine was in a System Updater fallback state, so installed
+packages did not show).
+
+* The first start downloaded Android and booted it (VMX with EPT on real
+  hardware; `airdroid status` said "Android is running (10 apps)").
+* Both starts ended with the whole machine stopped within a minute (no
+  ping, nothing on screen; the owner restarted it): about half a minute
+  after the first boot, and 23 s after the second start (2 vCPUs, 2 GB,
+  4.6 GB of memory free a few seconds before), just after Android's
+  compositor connected.
+* Nothing was captured there. It is probably the kernel panic below,
+  which more preemption of QEMU's threads brings out, and four hardware
+  threads give plenty of that. No measurements yet; to be repeated when
+  that is fixed.
+
+## The kernel panic under airDroid (airos-works/haiku#148, #147)
+
+"rw_lock_read_unlock(): lock ... not read-locked" in vm_soft_fault(),
+on a QEMU thread: first seen on the Framework laptop in Venus mode, then
+captured on the X399 in the default mode, where 48 busy loops beside
+airDroid bring it (or a silent stop of the machine) within a minute in
+three runs of four. In the captured run QEMU's own pthread_mutex_lock()
+had failed just before (QEMU aborts on that), so blocking goes wrong in
+more than one kind of kernel lock. The X399's unexplained outages are
+very likely this. Not airDroid's or QEMU's bug to fix; the reproduction
+is `tools/lab/race.sh` (airDroid, Settings scrolling, N busy loops) and the
+`kdl_capture` debugger add-on records the panic.
+
+On the way: the NVMM driver's os_preempt_disable() could count on a CPU
+the thread had left (fixed, Haiku 82ca96ec04; not the cause).
+
 ## Host frame path (X399, 2026-11-21)
 
 The app's CPU time while Android scrolls Settings (multi-window, virgl,
@@ -314,8 +349,8 @@ machine's Android after the hang above). airDroid now sets
   no NVMM there).
 * AMD hosts: see "On real hardware" above.
 * Not yet verified on hardware: a real microphone, and any Intel machine
-  (the VMX/EPT path is verified only in nested VMs; both test machines
-  are AMD).
+  (an Intel iMac boots Android but the machine then stops, see "An
+  Intel machine"; the VMX/EPT path is otherwise verified in nested VMs).
 
 ## GPU plan
 
