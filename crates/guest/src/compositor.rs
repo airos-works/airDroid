@@ -118,6 +118,13 @@ struct SrcRect {
     h: f64,
 }
 
+/// How much earlier than a frame's answer from the host its presentation is
+/// reported to Android, in percent of a refresh (see frame_done()). Measured
+/// on a 60 Hz display: between 11.5 and 13 ms no frame of the scroll test is
+/// late and a frame is back from the host in 5 ms; at 10 ms and at 14.5 ms
+/// some are late, with none it is 8 ms and up to 10 % late frames.
+const VSYNC_LEAD_PERCENT: u64 = 72;
+
 /// Damage that covers a surface whatever its size.
 const WHOLE_SURFACE: Rect = Rect::new(0, 0, 1 << 24, 1 << 24);
 
@@ -296,6 +303,11 @@ pub struct State {
     /// (frames, total ns, longest ns, bytes) of GPU read-backs since the
     /// last report
     readback_stats: (u64, u64, u64, u64),
+    /// frames answered, ns in all, the longest, how many took over 8 ms
+    frame_stats: (u64, u64, u64, u64),
+    /// how much earlier than a frame's answer its presentation is said to
+    /// have been (see frame_done()), if not VSYNC_LEAD_PERCENT of a refresh
+    vsync_lead_ns: Option<u64>,
     /// airdroid.present=host: the host has QEMU read GPU buffers itself
     present_host: bool,
     out: OutputCfg,
@@ -729,13 +741,38 @@ impl State {
         let output = self.outputs.first().cloned();
         let Some(w) = self.windows.get_mut(&wid) else { return };
         let Some(f) = w.in_flight.take_if(|f| f.serial == serial) else { return };
+        // how long the host takes to show a frame and say so, now and then
+        {
+            let dt = now.saturating_sub(f.sent_ns);
+            let st = &mut self.frame_stats;
+            st.0 += 1;
+            st.1 += dt;
+            st.2 = st.2.max(dt);
+            st.3 += (dt > 8_000_000) as u64;
+            if st.0 == 300 {
+                logf!(
+                    "frames: 300 to the host and back in {:.2} ms on average, {:.2} ms at most, {} over 8 ms",
+                    st.1 as f64 / 300.0 / 1e6,
+                    st.2 as f64 / 1e6,
+                    st.3
+                );
+                *st = (0, 0, 0, 0);
+            }
+        }
         for b in f.release {
             b.release();
         }
         for cb in f.callbacks {
             cb.done(t);
         }
-        let secs = now / 1_000_000_000;
+        // Android's composer takes this time as a vsync and plans the next
+        // ones from it. The host shows a frame at its display's vertical
+        // blank and answers then: said as it is, Android's next frame
+        // arrives just after a blank and waits most of a refresh for the
+        // one after. Said a little earlier, it arrives before the blank.
+        let lead = self.vsync_lead_ns.unwrap_or(refresh_ns as u64 * VSYNC_LEAD_PERCENT / 100);
+        let shown = now.saturating_sub(lead);
+        let secs = shown / 1_000_000_000;
         for fb in f.feedbacks {
             if let Some(o) = output.as_ref().filter(|o| o.id().same_client_as(&fb.id())) {
                 fb.sync_output(o);
@@ -743,7 +780,7 @@ impl State {
             fb.presented(
                 (secs >> 32) as u32,
                 secs as u32,
-                (now % 1_000_000_000) as u32,
+                (shown % 1_000_000_000) as u32,
                 refresh_ns,
                 0,
                 serial,
@@ -1961,6 +1998,12 @@ pub fn run(link: HostLink, inbox: Arc<Inbox>, socket: &str, out: OutputCfg) -> s
         drm,
         readback: Vec::new(),
         readback_stats: (0, 0, 0, 0),
+        frame_stats: (0, 0, 0, 0),
+        // (a file on the data disk, in microseconds, to try other values)
+        vsync_lead_ns: std::fs::read_to_string(format!("{}/vsync-lead", crate::container::DATA_DISK))
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|us| us * 1000),
         present_host,
         out,
         pagemap: std::fs::File::open("/proc/self/pagemap")?,
@@ -1988,7 +2031,10 @@ pub fn run(link: HostLink, inbox: Arc<Inbox>, socket: &str, out: OutputCfg) -> s
         host_clipboard: None,
         epoch: std::time::Instant::now(),
     };
-    logf!("wayland compositor listening on {socket}");
+    match st.vsync_lead_ns {
+        Some(ns) => logf!("wayland compositor listening on {socket} (vsync lead {} us)", ns / 1000),
+        None => logf!("wayland compositor listening on {socket}"),
+    }
 
     loop {
         let mut fds = [
