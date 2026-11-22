@@ -1,6 +1,6 @@
 --- a/server/main.c
 +++ b/server/main.c
-@@ -24,9 +24,252 @@
+@@ -24,9 +24,258 @@
   * from its start function.  In this case, render_context_main must be
   * thread-safe.
   */
@@ -205,12 +205,15 @@
 +            missing++;
 +         }
 +      }
-+      /* The drivers the mode has been run on with airDroid pass: NVK (a
-+       * GTX 1070) and RADV (a Radeon 840M). Any other needs
-+       * AIRDROID_VENUS_UNVERIFIED=1 to be tried, and then has to do what
-+       * vk_probe() tries; for those two its result is only told, in case
-+       * the probe asks more than Venus does.
++      /* The drivers the mode has been run on with airDroid: NVK (a GTX
++       * 1070), RADV (a Radeon 840M) and ANV (Iris Plus 640; it needs
++       * i915_drm's user pointer buffers, without which the import of host
++       * memory below fails). Any other needs AIRDROID_VENUS_UNVERIFIED=1
++       * to be tried, and then has to do what vk_probe() tries; for NVK
++       * and RADV its result is only told, in case the probe asks more
++       * than Venus does.
 +       */
++      const bool intel = strstr(p.deviceName, "Intel(R)") != NULL;
 +      const bool verified = strstr(p.deviceName, "NVK") != NULL
 +         || strstr(p.deviceName, "RADV") != NULL;
 +      const char *any = getenv("AIRDROID_VENUS_UNVERIFIED");
@@ -229,6 +232,9 @@
 +         ret = 0;
 +      } else if (failed) {
 +         printf(" %s (VkResult %d)\n", failed, (int)probe_result);
++      } else if (intel) {
++         printf(" ok\n");
++         ret = 0;
 +      } else if (asked) {
 +         printf(" ok (not verified with airDroid, allowed by AIRDROID_VENUS_UNVERIFIED)\n");
 +         ret = 0;
@@ -829,7 +835,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  static void
 --- a/src/venus/vkr_physical_device.c
 +++ b/src/venus/vkr_physical_device.c
-@@ -227,8 +227,54 @@
+@@ -227,8 +227,66 @@
            VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT);
     }
  
@@ -838,9 +844,14 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 +   /* air/OS: no driver exports memory as a file descriptor another process
 +    * could map (there are no dma-bufs; NVK on NVIDIA's resource manager
 +    * says it can and cannot), but they import host memory. Host visible
-+    * memory is then shared memory of ours (virgl_shm.h), imported: only
-+    * memory types that are not device local can be that, so the others are
-+    * not host visible to the guest.
++    * memory is then shared memory of ours (virgl_shm.h), imported. With a
++    * GPU that has memory of its own, only the memory types that are not
++    * device local can be that, so the others are not host visible to the
++    * guest. A GPU that uses the system's memory for everything (Intel's:
++    * every type of ANV's is device local, and it imports host memory as
++    * any of them) has no such types, and its host visible ones stay what
++    * they are; hiding them left the guest without any memory it could map
++    * (no fence, no buffer: the first Vulkan app died starting).
 +    */
 +   if (physical_dev->EXT_external_memory_host) {
 +      VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_props = {
@@ -859,7 +870,14 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
 +      physical_dev->is_opaque_fd_export_supported = false;
 +
 +      VkPhysicalDeviceMemoryProperties *mem_props = &physical_dev->memory_properties;
++      bool own_memory = false;
 +      for (uint32_t i = 0; i < mem_props->memoryTypeCount; i++) {
++         const VkMemoryPropertyFlags flags = mem_props->memoryTypes[i].propertyFlags;
++         if ((flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
++             !(flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
++            own_memory = true;
++      }
++      for (uint32_t i = 0; own_memory && i < mem_props->memoryTypeCount; i++) {
 +         if (mem_props->memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
 +            mem_props->memoryTypes[i].propertyFlags &=
 +               ~(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
@@ -885,7 +903,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
         !physical_dev->is_opaque_fd_export_supported &&
         physical_dev->EXT_external_memory_dma_buf)
        physical_dev->gbm_device = vkr_physical_device_get_gbm_device();
-@@ -273,6 +319,8 @@
+@@ -273,6 +331,8 @@
           physical_dev->KHR_external_memory_fd = true;
        else if (!strcmp(props->extensionName, "VK_EXT_external_memory_dma_buf"))
           physical_dev->EXT_external_memory_dma_buf = true;
@@ -894,7 +912,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
        else if (!strcmp(props->extensionName, "VK_KHR_external_fence_fd"))
           physical_dev->KHR_external_fence_fd = true;
  
-@@ -715,6 +763,28 @@
+@@ -715,6 +775,28 @@
     vn_replace_vkGetPhysicalDeviceImageFormatProperties2_args_handle(args);
     args->ret = vk->GetPhysicalDeviceImageFormatProperties2(
        args->physicalDevice, args->pImageFormatInfo, args->pImageFormatProperties);
@@ -923,7 +941,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  }
  
  static void
-@@ -754,10 +824,27 @@
+@@ -754,10 +836,27 @@
        vkr_physical_device_from_handle(args->physicalDevice);
     struct vn_physical_device_proc_table *vk = &physical_dev->proc_table;
  
@@ -951,7 +969,7 @@ Binary files virglrenderer-1.2.0/src/gallium/auxiliary/util/__pycache__/u_format
  }
  
  static void
-@@ -769,9 +856,21 @@
+@@ -769,9 +868,21 @@
        vkr_physical_device_from_handle(args->physicalDevice);
     struct vn_physical_device_proc_table *vk = &physical_dev->proc_table;
  

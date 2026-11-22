@@ -179,12 +179,19 @@ for airos-works/haiku#148), airDroid main as of this day:
   Android": 321-331 of 339-356 frames, 7-8 % janky.
 * Four minutes of scrolling in one go: 13546 frames, 0.44 % janky, the
   machine reachable throughout.
-* Vulkan (Venus) mode is refused there, with the reason: ANV cannot
-  import host memory on i915_drm, which has no userptr
-  (airos-works/haiku#150). Tried with the check overridden, Android got
-  its Vulkan device and the first Vulkan app died creating a fence.
-  Selected in the settings, the mode falls back to OpenGL and Android's
-  own lavapipe for Vulkan apps.
+* Vulkan (Venus) mode works with an i915_drm that has user pointer
+  buffers (airos-works/haiku#150; a test build of it, 2026-11-23): the
+  Godot editor on "Virtio-GPU Venus (Intel(R) Iris(R) Plus Graphics 640
+  (Kaby Lake GT3e))", Vulkan 1.4.307, in its own window and in "Show
+  Android"; the Settings scroll test there 317-331 of 335-351 frames,
+  8-10 % janky (7-8 % in the default mode), a frame read out of the GPU
+  in 3.2 ms. With the i915_drm of release 0832 the mode is refused with
+  the reason (no import of host memory) and falls back to OpenGL.
+  It took two things: the driver's user pointer buffers, and airDroid's
+  renderer no longer hiding "host visible" from memory types that are
+  device local when the GPU has no others (all of ANV's are; Android
+  was left without any memory it could map).
+* The microphone: see Microphone above.
 
 Before that fix (hrev60207+2823) the same machine stopped dead within a
 minute of each of two starts, with nothing on screen and no ping: the
@@ -204,7 +211,9 @@ is `tools/lab/race.sh` (airDroid, Settings scrolling, N busy loops) and the
 `kdl_capture` debugger add-on records the panic.
 
 Fixed in Haiku 28034134c6 (release 20261122-0832): the laptop, the X399
-and the iMac run airDroid on it without it. The cause: the NVMM driver's os_preempt_disable() counted
+and the iMac run airDroid on it without it; on the X399 the load that
+stopped it in three runs of four ran through three times of three
+(2026-11-23, 300 s each). The cause: the NVMM driver's os_preempt_disable() counted
 "do not reschedule" on a CPU the thread may have left a moment before
 (preempted between looking the CPU up and counting). That CPU then
 never switches threads again, and a thread there that wants to block
@@ -425,8 +434,8 @@ machine's Android after the hang above). airDroid now sets
 * ARM64 (Waydroid's arm64 images and QEMU under TCG would work but slowly;
   no NVMM there).
 * AMD hosts: see "On real hardware" above.
-* Vulkan mode has run on NVIDIA (NVK) and AMD (RADV), not on Intel (see
-  "An Intel machine").
+* Vulkan mode has run on NVIDIA (NVK), AMD (RADV) and Intel (ANV, with
+  the i915_drm of airos-works/haiku#150).
 
 ## GPU plan
 
@@ -523,11 +532,14 @@ machine's Android after the hang above). airDroid now sets
       that kernel panic, which had nothing to do with the driver.
       The check also tries what Venus does first with a device: a
       fence and a semaphore that export sync files, and an import of
-      host memory. Intel's ANV (Iris Plus 640, i915_drm) lists every
-      extension and fails the import (no userptr in i915_drm,
-      airos-works/haiku#150), so the mode stays off there and says why.
+      host memory. Intel's ANV (Iris Plus 640) lists every extension and
+      failed the import while i915_drm had no user pointer buffers
+      (airos-works/haiku#150); with them it passes and the mode runs
+      there too (see "An Intel machine").
       `AIRDROID_VENUS_UNVERIFIED=1` in the app's environment lets a
-      driver that is not NVK or RADV through if it passes those tries.
+      driver that is not NVK, RADV or ANV through if it passes those
+      tries. `tools/dev/vkprobe.c types` imports a locked area as every
+      memory type of a device, on the host.
       Open: one render server crash early on was not seen again. With
       that kernel bug a thread's wait for a lock can fail in any
       process, which would explain it, but nothing was kept of it.
