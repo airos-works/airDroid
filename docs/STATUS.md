@@ -79,6 +79,26 @@ Threadripper (AMD, NVMM's SVM path) with a GTX 1080 Ti:
   (e2fsck) and the computer never hung; the hang came with the corruption.
   airDroid runs on AMD again and is back in the images.
 
+## A second machine (Framework laptop, 2026-11-22)
+
+Ryzen AI 5 340 (12 threads), 16 GB, Radeon 840M with the AMD userland
+(virgl on radeonsi, not Zink), a 2256x1504 display (Android's is
+1289x859), air/OS hrev60207+2841, airDroid 0.1.0-124 as it came with the
+system update.
+
+* The first start downloaded Android (808 MB) and booted it in 16.8 s;
+  later starts 12.2-12.3 s (14 s from starting the app).
+* Settings cold start: 297-309 ms.
+* Scroll test: 314-315 of 316-317 frames on screen, 0-0.3 % janky,
+  median 5 ms; airDroid's CPU time 111 ms, QEMU's 4.9-5.3 s; reading a
+  frame out of the GPU 0.95 ms.
+* "Show Android": 296-307 of 298-311 frames, 1.6-5.7 % janky, 1.1 s of
+  airDroid's CPU time (2.6 s on the X399).
+* Started from a shell without a PATH the app could not download
+  Android ("No such file or directory": curl); it now runs curl and
+  unzip by where air/OS has them.
+* Vulkan (Venus) mode took the machine down: see the GPU plan.
+
 ## Host frame path (X399, 2026-11-21)
 
 The app's CPU time while Android scrolls Settings (multi-window, virgl,
@@ -292,7 +312,8 @@ machine's Android after the hang above). airDroid now sets
   no NVMM there).
 * AMD hosts: see "On real hardware" above.
 * Not yet verified on hardware: a real microphone, and any Intel machine
-  (the VMX/EPT path is verified only in nested VMs).
+  (the VMX/EPT path is verified only in nested VMs; both test machines
+  are AMD).
 
 ## GPU plan
 
@@ -378,8 +399,17 @@ machine's Android after the hang above). airDroid now sets
       stderr says why). NVK on the GTX 1070 passes; lavapipe of Mesa
       22 (the test VM) does not: there Vulkan apps found no
       VK_KHR_swapchain and failed to start before the check existed.
-      Open: one render server crash early on was not seen again and
-      not explained.
+      Having the extensions is not enough: on a Radeon 840M with RADV
+      (a Framework laptop, 2026-11-22) the check passed and the kernel
+      panicked as Android started in Venus mode ("rw_lock_read_unlock():
+      lock ... not read-locked" in vm_soft_fault(), from the page fault
+      of a QEMU disk thread's readv(): a read lock of QEMU's address
+      space had been released once too often by then). The check now
+      lets only NVK through, where the mode has been run;
+      `AIRDROID_VENUS_UNVERIFIED=1` in the app's environment lets any
+      driver with the extensions through, to try one.
+      Open: that panic; one render server crash early on was not seen
+      again and not explained.
       A third-party app: the Godot 4.3 editor (its Android APK has
       x86_64 code) started with `--rendering-method mobile
       --rendering-driver vulkan` reports "Vulkan 1.3.325 - Forward
