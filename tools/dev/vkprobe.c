@@ -2,6 +2,8 @@
  *   enum     instance, physical devices
  *   device   + a device with one queue
  *   submit   + an empty queue submission, waited for
+ *   types    + instead of what follows: a fully locked area imported as
+ *              each memory type in turn, and mapped where the type allows
  *   hostptr  + 1 MiB of a fully locked area imported as host memory
  *   buffer   + a buffer bound to it, filled by the GPU (vkCmdFillBuffer)
  * then stays for SECONDS (default 5) and tears everything down in order.
@@ -27,7 +29,8 @@ int main(int argc, char **argv)
 	const char *step = argc > 1 ? argv[1] : "enum";
 	int seconds = argc > 2 ? atoi(argv[2]) : 5;
 	int level = !strcmp(step, "enum") ? 0 : !strcmp(step, "device") ? 1
-		: !strcmp(step, "submit") ? 2 : !strcmp(step, "hostptr") ? 3 : 4;
+		: !strcmp(step, "submit") || !strcmp(step, "types") ? 2
+		: !strcmp(step, "hostptr") ? 3 : 4;
 
 	VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
 		.pApplicationName = "vkprobe", .apiVersion = VK_API_VERSION_1_1 };
@@ -62,7 +65,8 @@ int main(int argc, char **argv)
 		const char *exts[] = { "VK_EXT_external_memory_host" };
 		VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 			.queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
-			.enabledExtensionCount = level >= 3 ? 1 : 0, .ppEnabledExtensionNames = exts };
+			.enabledExtensionCount = level >= 3 || !strcmp(step, "types") ? 1 : 0,
+			.ppEnabledExtensionNames = exts };
 		say("vkCreateDevice", vkCreateDevice(pds[0], &dci, NULL, &dev));
 		vkGetDeviceQueue(dev, 0, 0, &queue);
 	}
@@ -70,6 +74,55 @@ int main(int argc, char **argv)
 		VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO };
 		say("vkQueueSubmit (empty)", vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
 		say("vkQueueWaitIdle", vkQueueWaitIdle(queue));
+	}
+	if (!strcmp(step, "types")) {
+		/* what Venus does for memory the guest maps: the guest picks the
+		   type, the host imports an area of its own as that type */
+		VkPhysicalDeviceMemoryProperties mp;
+		vkGetPhysicalDeviceMemoryProperties(pds[0], &mp);
+		PFN_vkGetMemoryHostPointerPropertiesEXT getProps =
+			(PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(dev,
+				"vkGetMemoryHostPointerPropertiesEXT");
+		for (uint32_t type = 0; type < mp.memoryTypeCount; type++) {
+			void *memory;
+			const size_t length = 65536;
+			area_id a = create_area("vkprobe type", &memory, B_ANY_ADDRESS, length,
+				B_FULL_LOCK, B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA);
+			if (a < 0) { printf("create_area failed\n"); return 2; }
+			memset(memory, 0, length);
+			VkMemoryHostPointerPropertiesEXT hp = {
+				.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT };
+			VkResult r = getProps(dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+				memory, &hp);
+			VkImportMemoryHostPointerInfoEXT imp = {
+				.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
+				.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+				.pHostPointer = memory };
+			VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+				.pNext = &imp, .allocationSize = length, .memoryTypeIndex = type };
+			VkDeviceMemory m = VK_NULL_HANDLE;
+			VkResult ar = r == VK_SUCCESS ? vkAllocateMemory(dev, &mai, NULL, &m) : r;
+			VkResult mr = VK_NOT_READY;
+			void *mapped = NULL;
+			if (ar == VK_SUCCESS
+				&& (mp.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+				mr = vkMapMemory(dev, m, 0, length, 0, &mapped);
+			printf("type %u: flags %#x heap %u, host pointer %s: import %d, map %d%s\n", type,
+				mp.memoryTypes[type].propertyFlags, mp.memoryTypes[type].heapIndex,
+				(hp.memoryTypeBits & (1u << type)) ? "allowed" : "NOT allowed", (int)ar, (int)mr,
+				mapped != NULL ? (mapped == memory ? " (the area itself)" : " (elsewhere)") : "");
+			fflush(stdout);
+			if (m != VK_NULL_HANDLE)
+				vkFreeMemory(dev, m, NULL);
+			printf("type %u: freed\n", type);
+			fflush(stdout);
+			/* waits until the driver has let go of the pages */
+			delete_area(a);
+			printf("type %u: area deleted\n", type);
+			fflush(stdout);
+		}
+		fflush(stdout);
+		return 0;
 	}
 	if (level >= 3) {
 		area = create_area("vkprobe host memory", (void **)&host, B_ANY_ADDRESS, size,

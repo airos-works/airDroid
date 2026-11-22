@@ -14,7 +14,7 @@ air/OS:
   virgl (virglrenderer on air/OS's Mesa), and its frames are read from
   GPU memory straight into the windows. Vulkan on the host GPU (Venus)
   is a choice in the settings window, still experimental (NVIDIA with
-  NVK and AMD with RADV so far; not Intel yet).
+  NVK, AMD with RADV and Intel with ANV).
 
 What works, as in Waydroid: installing apps from `.apk` files (open one,
 or `airdroid app install`), each app in its own resizable window or the
