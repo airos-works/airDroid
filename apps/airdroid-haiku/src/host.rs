@@ -114,6 +114,7 @@ mod ffi {
         pub fn ad_mic_open(id: u32, rate: u32, channels: u32) -> i32;
         pub fn ad_mic_take(id: u32, out: *mut i16, max: usize) -> usize;
         pub fn ad_mic_close(id: u32);
+        pub fn ad_mic_restart() -> i32;
         pub fn ad_settings_show(ram_mb: u32, cpus: u32, gpu: u32, dpi: u32, touch: i32, share: *const libc::c_char);
         pub fn ad_notify(
             id: u32,
@@ -291,6 +292,10 @@ mod imp {
     pub fn mic_close(id: u32) {
         unsafe { ffi::ad_mic_close(id) }
     }
+    /// Starts the audio input again (something else stopped it).
+    pub fn mic_restart() -> bool {
+        unsafe { ffi::ad_mic_restart() != 0 }
+    }
     pub fn settings_show(s: &crate::settings::Settings) {
         let gpu = match s.gpu.as_str() {
             "virgl" => 1,
@@ -380,6 +385,9 @@ mod imp {
         Vec::new()
     }
     pub fn mic_close(id: u32) {}
+    pub fn mic_restart() -> bool {
+        false
+    }
     pub fn settings_show(s: &crate::settings::Settings) {}
     pub fn notify(id: u32, app: &str, package: &str, title: &str, body: &str, image: Option<&airdroid_core::proto::NotifyImage>, png: Option<&[u8]>) {
         eprintln!("notification {id} {app}: {title}: {body}");

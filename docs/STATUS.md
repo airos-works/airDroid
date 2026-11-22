@@ -37,11 +37,22 @@
   off). Waydroid's data is a host folder; airDroid's is a disk image, so
   this is how files go back and forth.
 * Microphone: Android's record streams (PulseAudio, through Waydroid's
-  audio HAL) get the system's audio input (BMediaRecorder on the default
-  input node, converted to the stream's rate, channels and format), or
-  silence when there is none, so recording apps keep working. Verified on
-  KVM with a test tone (recorded 440 Hz, level as sent) and on the air/OS
-  test VM (no input there: silence); not yet with a real microphone.
+  audio HAL) get the system's audio input (one BMediaRecorder on the
+  default input node for all of them, converted to each stream's rate,
+  channels and format), or silence when there is none, so recording apps
+  keep working. Verified on KVM with a test tone (recorded 440 Hz, level
+  as sent) and with a real microphone: an iMac's internal one (Cirrus
+  hda, 2026-11-22), LineageOS' Recorder showing its waveform and saving
+  22 s; `AIRDROID_DEBUG=1` logs the level that goes to Android every two
+  seconds (-55 to -59 dBFS for a quiet room).
+  Real hardware took two fixes. Android opens two record streams, and a
+  recorder each connected to the input without an error and got no
+  data: recordings came out as empty files. And a sound card's node is
+  the audio output and the input at once, which the system mixer stops
+  whenever nothing plays any more (airos-works/haiku#151): the input
+  delivered three buffers and went quiet. airDroid starts it again when
+  nothing has come for a quarter of a second, and sends silence if that
+  does not help for three.
 * Multi-window resizing: the edges of an app's (borderless) window resize
   it on the desktop, and Android gives the app's task the new bounds
   (`am task resize`); moving works through Android's own caption bar.
@@ -414,8 +425,8 @@ machine's Android after the hang above). airDroid now sets
 * ARM64 (Waydroid's arm64 images and QEMU under TCG would work but slowly;
   no NVMM there).
 * AMD hosts: see "On real hardware" above.
-* Not yet verified on hardware: a real microphone. Vulkan mode has run
-  on NVIDIA (NVK) and AMD (RADV), not on Intel (see "An Intel machine").
+* Vulkan mode has run on NVIDIA (NVK) and AMD (RADV), not on Intel (see
+  "An Intel machine").
 
 ## GPU plan
 

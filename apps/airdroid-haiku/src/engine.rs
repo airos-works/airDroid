@@ -1028,7 +1028,7 @@ impl Engine {
             ToHost::AudioInOpen { stream, rate, channels } => {
                 let native = host::mic_open(stream, rate, channels);
                 debug_log(&format!("microphone {stream}: {rate} Hz x{channels}, {}", if native { "audio input" } else { "no input: silence" }));
-                self.mics.insert(stream, Mic { rate, channels, native, opened: Instant::now(), sent_frames: 0, got_data: false });
+                self.mics.insert(stream, Mic { rate, channels, native, opened: Instant::now(), sent_frames: 0, got_data: false, last_data: Instant::now(), kicked: Instant::now(), level: Level::default() });
             }
             ToHost::AudioInClose { stream } => {
                 if let Some(m) = self.mics.remove(&stream) {
@@ -1073,10 +1073,30 @@ impl Engine {
                 let data = host::mic_take(stream);
                 if !data.is_empty() {
                     m.got_data = true;
-                } else if !m.got_data && m.opened.elapsed() > Duration::from_secs(1) {
-                    debug_log(&format!("microphone {stream}: the audio input sends nothing; silence instead"));
+                    m.last_data = Instant::now();
+                } else if m.last_data.elapsed() > MIC_GIVE_UP {
+                    // nothing at all, or no more: the app recording must not
+                    // be left without data (its file would come out empty)
+                    debug_log(&format!(
+                        "microphone {stream}: the audio input sends {} ({} frames so far); silence instead",
+                        if m.got_data { "no more" } else { "nothing" },
+                        m.sent_frames
+                    ));
                     host::mic_close(stream);
                     m.native = false;
+                    // silence from here on, in real time; not all at once
+                    // for the time the input left out
+                    m.sent_frames = due;
+                } else if m.last_data.elapsed() > MIC_QUIET && m.kicked.elapsed() > MIC_QUIET {
+                    // the system mixer stops the sound card when nothing
+                    // plays any more, and the card is the microphone too
+                    m.kicked = Instant::now();
+                    let started = host::mic_restart();
+                    debug_log(&format!(
+                        "microphone {stream}: the audio input went quiet after {} frames; started again{}",
+                        m.sent_frames,
+                        if started { "" } else { " (that failed)" }
+                    ));
                 }
                 data
             } else if due >= m.sent_frames + m.rate as u64 / 100 {
@@ -1085,7 +1105,15 @@ impl Engine {
                 Vec::new()
             };
             if !data.is_empty() {
+                let before = m.sent_frames / (m.rate as u64 * 2);
                 m.sent_frames += data.len() as u64 / (m.channels as u64 * 2);
+                if debug() {
+                    m.level.add(&data);
+                    if m.sent_frames / (m.rate as u64 * 2) != before {
+                        let from = if m.native { "the audio input" } else { "silence" };
+                        debug_log(&format!("microphone {stream}: two seconds of {from}: {}", m.level.take()));
+                    }
+                }
                 let _ = s.send(&ToGuest::AudioIn { stream, data });
             }
         }
@@ -1339,6 +1367,11 @@ fn debug_log(text: &str) {
     }
 }
 
+/// The audio input is started again when it has delivered nothing for this
+/// long, and given up on (silence instead) after this long.
+const MIC_QUIET: Duration = Duration::from_millis(250);
+const MIC_GIVE_UP: Duration = Duration::from_secs(3);
+
 /// An Android record stream being fed (see Engine::microphones).
 struct Mic {
     rate: u32,
@@ -1348,6 +1381,43 @@ struct Mic {
     opened: Instant,
     sent_frames: u64,
     got_data: bool,
+    /// when the audio input last delivered something (or the stream opened)
+    last_data: Instant,
+    /// when the audio input was last started again
+    kicked: Instant,
+    /// what went to Android since the level was last logged (debug)
+    level: Level,
+}
+
+/// Peak and energy of 16 bit samples, for the debug log.
+#[derive(Default)]
+struct Level {
+    samples: u64,
+    squares: f64,
+    peak: u32,
+}
+
+impl Level {
+    fn add(&mut self, data: &[u8]) {
+        for pair in data.chunks_exact(2) {
+            let v = i16::from_le_bytes([pair[0], pair[1]]) as i32;
+            self.samples += 1;
+            self.squares += (v * v) as f64;
+            self.peak = self.peak.max(v.unsigned_abs());
+        }
+    }
+
+    /// "peak 1234, -42.1 dBFS" and a fresh start.
+    fn take(&mut self) -> String {
+        let rms = if self.samples > 0 { (self.squares / self.samples as f64).sqrt() } else { 0.0 };
+        let text = if rms > 0.0 {
+            format!("peak {}, {:.1} dBFS", self.peak, 20.0 * (rms / 32768.0).log10())
+        } else {
+            "digital silence".to_string()
+        };
+        *self = Level::default();
+        text
+    }
 }
 
 pub(crate) fn debug() -> bool {

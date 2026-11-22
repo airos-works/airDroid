@@ -1724,11 +1724,15 @@ ad_audio_close(uint32 id)
 // #pragma mark - microphone
 
 
-/*! A record stream of Android's: the system's audio input through a
-	BMediaRecorder, converted to s16 interleaved at the stream's rate and
-	channel count (linear interpolation), queued for ad_mic_take(). */
+/*! A record stream of Android's: the system's audio input, converted to s16
+	interleaved at the stream's rate and channel count (linear
+	interpolation), queued for ad_mic_take().
+
+	All streams share one BMediaRecorder (sMicRecorder): Android keeps more
+	than one record stream open, and the audio input has one output. A
+	recorder per stream connected without an error on real hardware (an
+	iMac's hda input) and then none of them got any data. */
 struct MicIn {
-	BMediaRecorder*		recorder;
 	uint32				rate;
 	uint32				channels;
 	std::mutex			lock;
@@ -1736,11 +1740,12 @@ struct MicIn {
 	std::vector<float>	previous;	// the last source frame, per output channel
 	double				phase;		// next output's position after it, in frames
 
-	MicIn() : recorder(NULL), rate(0), channels(0), phase(0) {}
+	MicIn() : rate(0), channels(0), phase(0) {}
 };
 
 static std::mutex sMicLock;
 static std::map<uint32, MicIn*> sMics;
+static BMediaRecorder* sMicRecorder;
 
 
 static inline float
@@ -1763,10 +1768,8 @@ MicSample(const uint8* frame, uint32 format, uint32 index)
 
 
 static void
-RecordMic(void* cookie, bigtime_t, void* data, size_t size,
-	const media_format& format)
+RecordMicFor(MicIn* m, void* data, size_t size, const media_format& format)
 {
-	MicIn* m = (MicIn*)cookie;
 	const media_raw_audio_format& raw = format.u.raw_audio;
 	uint32 sourceChannels = raw.channel_count;
 	size_t sampleSize = raw.format & media_raw_audio_format::B_AUDIO_SIZE_MASK;
@@ -1810,6 +1813,16 @@ RecordMic(void* cookie, bigtime_t, void* data, size_t size,
 }
 
 
+static void
+RecordMic(void*, bigtime_t, void* data, size_t size,
+	const media_format& format)
+{
+	std::lock_guard<std::mutex> lock(sMicLock);
+	for (auto& entry : sMics)
+		RecordMicFor(entry.second, data, size, format);
+}
+
+
 /*! Starts capturing for record stream `id`; false without an audio input. */
 int
 ad_mic_open(uint32 id, uint32 rate, uint32 channels)
@@ -1817,31 +1830,61 @@ ad_mic_open(uint32 id, uint32 rate, uint32 channels)
 	MicIn* m = new MicIn;
 	m->rate = rate;
 	m->channels = channels;
-	m->recorder = new BMediaRecorder("airDroid microphone", B_MEDIA_RAW_AUDIO);
-	media_node input;
-	media_format format;
-	format.type = B_MEDIA_RAW_AUDIO;
-	format.u.raw_audio = media_raw_audio_format::wildcard;
-	status_t status = m->recorder->InitCheck();
-	if (status == B_OK)
-		status = BMediaRoster::Roster()->GetAudioInput(&input);
-	if (status == B_OK)
-		status = m->recorder->SetHooks(RecordMic, NULL, m);
-	if (status == B_OK) {
-		m->recorder->SetAcceptedFormat(format);
-		status = m->recorder->Connect(input, NULL, &format);
-	}
-	if (status == B_OK)
-		status = m->recorder->Start();
-	if (status != B_OK) {
-		fprintf(stderr, "airDroid: no microphone (%s)\n", strerror(status));
-		delete m->recorder;
-		delete m;
-		return 0;
-	}
+
 	std::lock_guard<std::mutex> lock(sMicLock);
+	if (sMicRecorder == NULL) {
+		BMediaRecorder* recorder = new BMediaRecorder("airDroid microphone",
+			B_MEDIA_RAW_AUDIO);
+		media_node input;
+		media_format format;
+		format.type = B_MEDIA_RAW_AUDIO;
+		format.u.raw_audio = media_raw_audio_format::wildcard;
+		BMediaRoster* roster = BMediaRoster::Roster();
+		status_t status = recorder->InitCheck();
+		if (status == B_OK)
+			status = roster->GetAudioInput(&input);
+		if (status == B_OK)
+			status = recorder->SetHooks(RecordMic, NULL, NULL);
+		if (status == B_OK) {
+			// the input's own format where it says one, else whatever it
+			// and the recorder agree on
+			media_output output;
+			int32 count = 0;
+			if (roster->GetFreeOutputsFor(input, &output, 1, &count,
+					B_MEDIA_RAW_AUDIO) == B_OK && count >= 1) {
+				format.u.raw_audio = output.format.u.raw_audio;
+				status = recorder->Connect(input, &output, &format);
+			} else {
+				recorder->SetAcceptedFormat(format);
+				status = recorder->Connect(input, NULL, &format);
+			}
+		}
+		if (status == B_OK)
+			status = recorder->Start();
+		if (status != B_OK) {
+			fprintf(stderr, "airDroid: no microphone (%s)\n", strerror(status));
+			delete recorder;
+			delete m;
+			return 0;
+		}
+		sMicRecorder = recorder;
+	}
 	sMics[id] = m;
 	return 1;
+}
+
+
+/*! Starts the audio input again. A sound card's node is both the audio
+	output and the audio input, and the system mixer stops that node whenever
+	nothing plays any more (AudioMixer::_AutoStop()): a recording in progress
+	then gets no more buffers. Called when they stay away. */
+int
+ad_mic_restart()
+{
+	std::lock_guard<std::mutex> lock(sMicLock);
+	if (sMicRecorder == NULL)
+		return 0;
+	return sMicRecorder->Start(true) == B_OK;
 }
 
 
@@ -1849,14 +1892,11 @@ ad_mic_open(uint32 id, uint32 rate, uint32 channels)
 size_t
 ad_mic_take(uint32 id, int16* out, size_t max)
 {
-	MicIn* m;
-	{
-		std::lock_guard<std::mutex> lock(sMicLock);
-		auto it = sMics.find(id);
-		if (it == sMics.end())
-			return 0;
-		m = it->second;
-	}
+	std::lock_guard<std::mutex> mapLock(sMicLock);
+	auto it = sMics.find(id);
+	if (it == sMics.end())
+		return 0;
+	MicIn* m = it->second;
 	std::lock_guard<std::mutex> lock(m->lock);
 	size_t n = std::min(max, m->queue.size()) / m->channels * m->channels;
 	memcpy(out, m->queue.data(), n * sizeof(int16));
@@ -1869,6 +1909,7 @@ void
 ad_mic_close(uint32 id)
 {
 	MicIn* m;
+	BMediaRecorder* recorder = NULL;
 	{
 		std::lock_guard<std::mutex> lock(sMicLock);
 		auto it = sMics.find(id);
@@ -1876,10 +1917,18 @@ ad_mic_close(uint32 id)
 			return;
 		m = it->second;
 		sMics.erase(it);
+		if (sMics.empty()) {
+			// the last stream: the input is let go of (outside the lock,
+			// the hook takes it)
+			recorder = sMicRecorder;
+			sMicRecorder = NULL;
+		}
 	}
-	m->recorder->Stop();
-	m->recorder->Disconnect();
-	delete m->recorder;
+	if (recorder != NULL) {
+		recorder->Stop();
+		recorder->Disconnect();
+		delete recorder;
+	}
 	delete m;
 }
 
