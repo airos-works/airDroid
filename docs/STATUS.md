@@ -133,8 +133,14 @@ very likely this. Not airDroid's or QEMU's bug to fix; the reproduction
 is `tools/lab/race.sh` (airDroid, Settings scrolling, N busy loops) and the
 `kdl_capture` debugger add-on records the panic.
 
-On the way: the NVMM driver's os_preempt_disable() could count on a CPU
-the thread had left (fixed, Haiku 82ca96ec04; not the cause).
+The probable cause: the NVMM driver's os_preempt_disable() counted
+"do not reschedule" on a CPU the thread may have left a moment before
+(preempted between looking the CPU up and counting). That CPU then
+never switches threads again, and a thread there that wants to block
+just carries on. A first patch is in Haiku 82ca96ec04; it has not run
+on a machine yet (the X399 kept using its packaged driver beside the
+patched non-packaged one, so those runs say nothing about it), and the
+fix is being reworked and tested under #148.
 
 ## Host frame path (X399, 2026-11-21)
 
