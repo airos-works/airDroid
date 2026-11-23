@@ -2,6 +2,8 @@
 //!
 //!   airdroid status
 //!   airdroid shell [-u UID] [--vm] COMMAND...   run in Android (as root) or the VM
+//!       (Android takes a root caller for its system user, which `am` and
+//!       `pm uninstall` refuse: `-u 2000` runs as the shell user, as adb does)
 //!   airdroid logcat [ARGS...]
 //!   airdroid app install FILE (.apk, .apkm, .xapk, .apks) | remove PACKAGE | launch PACKAGE | list
 //!   airdroid app intent ACTION [URI]
