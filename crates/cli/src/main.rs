@@ -1,9 +1,8 @@
 //! airdroid: the command line of the running airDroid app, after waydroid's.
 //!
 //!   airdroid status
-//!   airdroid shell [-u UID] [--vm] COMMAND...   run in Android (as root) or the VM
-//!       (Android takes a root caller for its system user, which `am` and
-//!       `pm uninstall` refuse: `-u 2000` runs as the shell user, as adb does)
+//!   airdroid shell [-u UID] [--vm] COMMAND...   run in Android (as its shell user,
+//!                                                like adb shell; -u 0: root) or the VM
 //!   airdroid logcat [ARGS...]
 //!   airdroid app install FILE (.apk, .apkm, .xapk, .apks) | remove PACKAGE | launch PACKAGE | list
 //!   airdroid app intent ACTION [URI]
@@ -26,11 +25,22 @@ fn state_dir() -> PathBuf {
 fn usage() -> ! {
     let _ = writeln!(std::io::stderr(), 
         "usage: airdroid status | shell [-u UID] [--vm] COMMAND... | logcat [ARGS...]\n\
+         \x20      (shell runs as Android's shell user, like adb shell; -u 0 for root)\n\
          \x20      | app install FILE | app remove PACKAGE | app launch PACKAGE | app list\n\
          \x20      | app intent ACTION [URI] | show-full-ui | prop get KEY | prop set KEY VALUE | upgrade | stop"
     );
     std::process::exit(2)
 }
+
+/// Android's shell user (AID_SHELL), what `adb shell` runs commands as.
+///
+/// `airdroid shell` runs as this user unless told otherwise, not as root:
+/// the Java services of Waydroid's Android take a root caller from outside
+/// for the system user (uid 1000; the native services see root), and the
+/// shell commands of the activity and package managers serve root and the
+/// shell user only. As root `am` did nothing and said nothing, and
+/// `pm uninstall` ended in a NullPointerException.
+const AID_SHELL: u32 = 2000;
 
 fn shell(argv: Vec<String>, uid: Option<u32>, vm: bool) -> Request {
     // one string: run it with sh -c, as `waydroid shell -- CMD` would
@@ -47,13 +57,18 @@ fn main() {
         ["upgrade"] => Request::Upgrade,
         ["show-full-ui"] => Request::ShowFullUi,
         ["shell", rest @ ..] => {
-            let mut uid = None;
+            let mut uid = Some(AID_SHELL);
             let mut vm = false;
             let mut i = 0;
             while i < rest.len() {
                 match rest[i] {
                     "-u" | "--uid" => {
-                        uid = rest.get(i + 1).and_then(|u| u.parse().ok());
+                        // 0: root, as the guest's daemon is (no change of user)
+                        uid = match rest.get(i + 1).and_then(|u| u.parse().ok()) {
+                            Some(0) => None,
+                            Some(u) => Some(u),
+                            None => usage(),
+                        };
                         i += 2;
                     }
                     "--vm" => {
@@ -70,6 +85,8 @@ fn main() {
             if i >= rest.len() {
                 usage();
             }
+            // the VM's own userland has no such users
+            let uid = if vm { None } else { uid };
             shell(rest[i..].iter().map(|s| s.to_string()).collect(), uid, vm)
         }
         ["logcat", rest @ ..] => {

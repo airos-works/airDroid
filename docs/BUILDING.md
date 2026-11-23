@@ -67,4 +67,9 @@ VMX, so NVMM works inside it:
 * The guest's console (kernel, Android's init via `/dev/kmsg`, the daemon)
   is `~/config/cache/airDroid/console.log`; QEMU's is `qemu.log`.
 * `airdroid logcat`, `airdroid shell dmesg`, `airdroid shell --vm CMD` (the
-  VM's own busybox userland).
+  VM's own busybox userland). `airdroid shell` runs its command as
+  Android's shell user, as `adb shell` does (`am`, `pm`, `input`, `wm`,
+  `dumpsys`, `settings`); `airdroid shell -u 0 CMD` runs it as root, for
+  files under `/data`. As root, `am` and `pm uninstall` do not work: the
+  Java services of this Android take a root caller from outside for the
+  system user.
