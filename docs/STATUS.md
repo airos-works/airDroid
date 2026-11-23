@@ -209,7 +209,16 @@ with › airDroid (airDroid takes zip files for that), the app's Install App…
 or `airdroid app install`; all of them go by the contents, not the name.
 The post-install script had filled in neither type's description and
 extensions: `mimeset` on the app makes the types it supports, empty, and the
-script asked whether the type existed.
+script asked whether the type existed. It also ran only when a system
+started for the first time, because the package did not declare it: it runs
+now whenever the package is installed or upgraded. A file that was on the
+disk before airDroid's rules keeps the type it got then (a real APKMirror
+download was a Java archive, and a double click did not reach airDroid), so
+the script identifies again the files named `.apk`, `.apkm`, `.xapk` and
+`.apks` whose type is a zip archive, a Java archive, plain data or none;
+a type somebody chose is left alone (found on the Framework Desktop,
+2026-11-23, where a TIDAL `.apkm` of APKMirror's installed as base, `en`,
+x86_64 and xhdpi and played).
 
 Tests: the choice of splits, the zip reader and the name checks have unit
 tests (`cargo test -p airdroid-guest bundle`). `tools/dev/test-bundle/build.sh`
