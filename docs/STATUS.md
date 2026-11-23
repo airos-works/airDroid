@@ -181,7 +181,12 @@ expansion file. On Linux/KVM and on the X399 all three install (3 of 13
 APKs: base, x86_64, tvdpi), `pm path` lists the three, the app starts (it
 cannot without the x86_64 split) and the expansion file is in place.
 APKPure's Wikipedia `.xapk` (arm64-v8a only) is refused as said above, and
-its base APK alone gives the "one part of the app" message.
+its base APK alone gives the "one part of the app" message. A real `.apkm`
+from APKMirror (Twitch 26.2.4, 109 MB, four processor types and seven
+densities, version 5 of the format with the signature's entries first) is
+typed as an app bundle on the X399, opens in airDroid from there, installs
+(3 of 12 APKs: base, x86_64, tvdpi) and the app runs, there and on
+Linux/KVM.
 
 Not done: an `.apkm` in APKMirror's old encrypted format (the site has not
 made those for years; the message says to download it again), and bundles
