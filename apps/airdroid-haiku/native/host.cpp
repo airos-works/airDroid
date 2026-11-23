@@ -68,6 +68,7 @@
 #include <string>
 #include <vector>
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -113,6 +114,8 @@ enum {
 	AD_APP_CLICKED = 17,	// text: package
 	AD_CLIPBOARD = 18,		// text: clipboard text
 	AD_TASK_BOUNDS = 19,	// x, y: left top; dx, dy: width height (screen)
+	AD_DRAG_BEGIN = 20,		// the user started moving or resizing a window
+	AD_ZOOM = 21,			// x, y, dx, dy: the frame BWindow::Zoom() chose
 };
 
 // AD_ACTION ids (the main window's menu and buttons)
@@ -205,7 +208,10 @@ public:
 		fCursorHidden(false),
 		fBorderless(false),
 		fResizeEdges(0),
-		fResizing(false)
+		fResizing(false),
+		fCaption(0),
+		fCaptionPress(false),
+		fMoving(false)
 	{
 		SetViewColor(B_TRANSPARENT_COLOR);
 		SetDrawingMode(B_OP_COPY);
@@ -322,6 +328,26 @@ public:
 
 	void SetBorderless(bool borderless) { fBorderless = borderless; }
 
+	/*!	Multi-window: Android draws its caption bar in the top \a height
+		pixels of the window (0: none). Dragging it moves the window right
+		here, under the mouse, and Android gets the new bounds when the
+		mouse button goes up; a press that does not move is a click for
+		Android (the caption's buttons). */
+	void SetCaption(float height) { fCaption = height; }
+
+	// Where the mouse is on the screen, as app_server said when it sent
+	// the message: the window's own idea of its frame can be behind while
+	// it moves.
+	BPoint ScreenWhere(BPoint where)
+	{
+		BMessage* message = Window()->CurrentMessage();
+		BPoint screen;
+		if (message != NULL && message->FindPoint("screen_where", &screen)
+				== B_OK)
+			return screen;
+		return ConvertToScreen(where);
+	}
+
 	// Multi-window windows have no border: their edges resize them, and
 	// Android then gives the app's task the new bounds.
 	enum { kLeft = 1, kTop = 2, kRight = 4, kBottom = 8 };
@@ -375,8 +401,9 @@ public:
 		if (edges != 0) {
 			SetEdgeCursor(edges);
 			fResizing = true;
-			fResizeStart = ConvertToScreen(where);
+			fResizeStart = ScreenWhere(where);
 			fStartFrame = Window()->Frame();
+			Push(MakeEvent(AD_DRAG_BEGIN, fId));
 			return;
 		}
 		AdEvent event = MakeEvent(AD_MOUSE_DOWN, fId);
@@ -388,13 +415,34 @@ public:
 			message->FindInt32("clicks", &event.clicks);
 		}
 		event.modifiers = modifiers();
+		if (fBorderless && where.y < fCaption && !fCaptionPress
+			&& event.buttons == B_PRIMARY_MOUSE_BUTTON) {
+			// a click on a caption button, or the start of a move: which
+			// one, the next mouse moves tell
+			fCaptionPress = true;
+			fMoving = false;
+			fPress = event;
+			fPressScreen = ScreenWhere(where);
+			return;
+		}
 		Push(event);
 	}
 
 	virtual void MouseUp(BPoint where)
 	{
-		if (fResizing) {
-			fResizing = false;
+		if (fCaptionPress && !fMoving) {
+			// a click: Android gets the press now, then the release
+			fCaptionPress = false;
+			Push(fPress);
+			AdEvent event = MakeEvent(AD_MOUSE_UP, fId);
+			event.x = where.x;
+			event.y = where.y;
+			Push(event);
+			return;
+		}
+		if (fCaptionPress || fResizing) {
+			// moved or resized here: Android gives the task these bounds
+			fCaptionPress = fMoving = fResizing = false;
 			BRect f = Window()->Frame();
 			AdEvent event = MakeEvent(AD_TASK_BOUNDS, fId);
 			event.x = f.left;
@@ -416,8 +464,22 @@ public:
 	virtual void MouseMoved(BPoint where, uint32 transit,
 		const BMessage* dragMessage)
 	{
+		if (fCaptionPress) {
+			BPoint p = ScreenWhere(where);
+			float dx = p.x - fPressScreen.x, dy = p.y - fPressScreen.y;
+			if (!fMoving) {
+				if (fabsf(dx) < kDragSlop && fabsf(dy) < kDragSlop)
+					return;
+				fMoving = true;
+				fStartFrame = Window()->Frame();
+				Push(MakeEvent(AD_DRAG_BEGIN, fId));
+			}
+			Window()->MoveTo(roundf(fStartFrame.left + dx),
+				roundf(fStartFrame.top + dy));
+			return;
+		}
 		if (fResizing) {
-			BPoint p = ConvertToScreen(where);
+			BPoint p = ScreenWhere(where);
 			float dx = p.x - fResizeStart.x, dy = p.y - fResizeStart.y;
 			BRect f = fStartFrame;
 			const float kMinW = 160, kMinH = 120;
@@ -531,6 +593,15 @@ private:
 	bool		fResizing;
 	BPoint		fResizeStart;
 	BRect		fStartFrame;
+	float		fCaption;
+	bool		fCaptionPress;
+	bool		fMoving;
+	AdEvent		fPress;
+	BPoint		fPressScreen;
+
+	// how far the mouse goes with the button down before a press on the
+	// caption is a move rather than a click
+	static constexpr float kDragSlop = 3;
 };
 
 
@@ -541,8 +612,12 @@ public:
 		BWindow(frame, title,
 			borderless ? B_NO_BORDER_WINDOW_LOOK : B_TITLED_WINDOW_LOOK,
 			B_NORMAL_WINDOW_FEEL, B_ASYNCHRONOUS_CONTROLS
-				| (borderless ? B_NOT_RESIZABLE | B_NOT_ZOOMABLE : 0)),
-		fId(id)
+				// Android's caption is this window's title bar: its
+				// buttons take the click that activates the window too
+				| (borderless ? B_NOT_RESIZABLE | B_NOT_ZOOMABLE
+					| B_WILL_ACCEPT_FIRST_CLICK : 0)),
+		fId(id),
+		fZoomAsked(false)
 	{
 		fView = new AndroidView(Bounds(), id);
 		fView->SetBorderless(borderless);
@@ -558,6 +633,33 @@ public:
 	}
 
 	AndroidView* View() const { return fView; }
+
+	/*!	The frame BWindow::Zoom() would give the window: the display the
+		window is on (or all of them, as the Screen preferences say) less
+		the Deskbar. It comes as an AD_ZOOM event; the window stays as it
+		is (whether that zooms or restores it is the engine's to say: the
+		window follows Android's task, which may not take that frame quite
+		as asked). Called locked. */
+	void AskZoomFrame()
+	{
+		fZoomAsked = true;
+		BWindow::Zoom();
+		fZoomAsked = false;
+	}
+
+	virtual void Zoom(BPoint origin, float width, float height)
+	{
+		if (!fZoomAsked) {
+			BWindow::Zoom(origin, width, height);
+			return;
+		}
+		AdEvent event = MakeEvent(AD_ZOOM, fId);
+		event.x = origin.x;
+		event.y = origin.y;
+		event.dx = width + 1;
+		event.dy = height + 1;
+		Push(event);
+	}
 
 	virtual bool QuitRequested()
 	{
@@ -594,6 +696,7 @@ public:
 private:
 	uint32			fId;
 	AndroidView*	fView;
+	bool			fZoomAsked;
 };
 
 
@@ -1459,6 +1562,41 @@ ad_window_present(uint32 id, const uint32* pixels, int32 width, int32 height)
 	if (w == NULL)
 		return;
 	w->View()->Present(pixels, width, height);
+	w->Unlock();
+}
+
+
+void
+ad_window_zoom(uint32 id)
+{
+	AndroidWindow* w = LockWindow(id);
+	if (w == NULL)
+		return;
+	w->AskZoomFrame();
+	w->Unlock();
+}
+
+
+void
+ad_window_minimize(uint32 id)
+{
+	AndroidWindow* w = LockWindow(id);
+	if (w == NULL)
+		return;
+	w->Minimize(true);
+	w->Unlock();
+}
+
+
+/*! Multi-window: the height of Android's caption bar at the window's top
+	(0: none), which moves the window when dragged. */
+void
+ad_window_set_caption(uint32 id, float height)
+{
+	AndroidWindow* w = LockWindow(id);
+	if (w == NULL)
+		return;
+	w->View()->SetCaption(height);
 	w->Unlock();
 }
 

@@ -90,9 +90,91 @@ struct Win {
     candidate: Option<Rect>,
     buttons: i32,
     touching: bool,
+    /// the app's package (multi-window; empty otherwise)
+    package: String,
+    /// the frame this engine last gave the BWindow (shown can differ while
+    /// the window's geometry is the user's, see hold)
+    placed: Option<Rect>,
+    hold: Hold,
+    /// since when Android has shown the task fullscreen, which its
+    /// caption's maximize button does: the window zooms instead
+    fullscreen_since: Option<Instant>,
+    /// the caption height the BWindow was told about
+    caption: f32,
+    /// zoomed (maximized): the frame to go back to
+    unzoomed: Option<Rect>,
+    /// where the task has been since when, and where it last stayed a
+    /// while (Android animates a task going fullscreen: the frame to go
+    /// back to from a zoom is the one before that)
+    latest: Option<(Rect, Instant)>,
+    rested: Option<Rect>,
 }
 
+/// Who decides where a multi-window window is and how big.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Hold {
+    /// Android: the window follows its task
+    None,
+    /// the user is moving or resizing the window (since then)
+    Dragging(Instant),
+    /// the user moved, resized or zoomed it to this frame; the window stays
+    /// there until Android's task is there too (or a while has passed)
+    Settling(Rect, Instant),
+}
+
+/// Android's freeform caption bar (framework decor_caption.xml: 32 dp
+/// buttons with 5 dp margins) and the corners of a task that Android keeps
+/// for resizing (SystemUI's freeform_resize_corner, 44 dp, half of it inside
+/// the task). Clicks and touches there go nowhere, though the caption's
+/// back and close buttons reach into them.
+const CAPTION_DP: f32 = 42.0;
+const RESIZE_CORNER_DP: f32 = 22.0;
+/// Linux KEY_F11: Waydroid's Android toggles the focused task between
+/// freeform and fullscreen with it.
+const KEY_F11: u32 = 87;
+
 impl Win {
+    fn new(title: String, package: String) -> Win {
+        Win {
+            painted: Painted::default(),
+            canvas: Canvas::new(),
+            crop: None,
+            title,
+            shown: None,
+            candidate: None,
+            buttons: 0,
+            touching: false,
+            package,
+            placed: None,
+            hold: Hold::None,
+            fullscreen_since: None,
+            caption: 0.0,
+            unzoomed: None,
+            latest: None,
+            rested: None,
+        }
+    }
+
+    /// Host window coordinates to Android's, where a click on the caption
+    /// bar reaches its button: in the task's top corners (`corner` pixels
+    /// square) Android takes clicks for resizing, so a point there moves
+    /// sideways out of the corner, onto the same 32 dp button.
+    fn to_android_caption(&self, x: f32, y: f32, corner: f32) -> (f32, f32) {
+        let (x, y) = self.to_android(x, y);
+        let Some(a) = self.shown else { return (x, y) };
+        let (l, t, r) = (a.x as f32, a.y as f32, (a.x + a.w) as f32);
+        if self.caption <= 0.0 || y < t || y >= t + corner.min(self.caption) {
+            return (x, y);
+        }
+        if x >= l && x < l + corner {
+            (l + corner, y)
+        } else if x >= r - corner && x < r {
+            (r - corner - 1.0, y)
+        } else {
+            (x, y)
+        }
+    }
+
     /// Host window coordinates to Android window coordinates.
     fn to_android(&self, x: f32, y: f32) -> (f32, f32) {
         let (ox, oy) = self.shown.map_or((0, 0), |r| (r.x, r.y));
@@ -120,6 +202,11 @@ pub struct Engine {
     next_vsync: Instant,
     modifiers: u32,
     apps: Vec<AppInfo>,
+    /// Android's display density (dpi)
+    dpi: u32,
+    /// windows left minimized when Android hid their app's task: their
+    /// (former) ids and the apps' packages
+    hidden: HashMap<u32, String>,
     installs: HashMap<u32, String>,
     /// An install finished: the next app list's new apps get a notification.
     announce_new_apps: bool,
@@ -168,6 +255,8 @@ impl Engine {
             next_vsync: Instant::now(),
             modifiers: 0,
             apps: Vec::new(),
+            dpi: 160,
+            hidden: HashMap::new(),
             installs: HashMap::new(),
             announce_new_apps: false,
             install_baseline: None,
@@ -603,10 +692,11 @@ impl Engine {
         self.session = None;
         self.mem = None;
         self.buffers.clear();
-        for id in self.windows.keys().copied().collect::<Vec<_>>() {
+        for id in self.windows.keys().chain(self.hidden.keys()).copied().collect::<Vec<_>>() {
             host::window_close(id);
         }
         self.windows.clear();
+        self.hidden.clear();
         self.frames_done.clear();
         for (stream, m) in self.mics.drain() {
             if m.native {
@@ -762,7 +852,17 @@ impl Engine {
             ToHost::WindowDestroy { id } if debug() && { eprintln!("airDroid: window {id} destroyed"); false } => {}
             ToHost::WindowNew { id, title, app_id, .. } => {
                 let title = window_title(&title, &app_id, &self.apps);
-                self.windows.insert(id, Win { painted: Painted::default(), canvas: Canvas::new(), crop: None, title, shown: None, candidate: None, buttons: 0, touching: false });
+                let package = app_id.strip_prefix("waydroid.").unwrap_or("").to_string();
+                // the app is back: the window left minimized when Android
+                // hid its task makes room for this one
+                if !package.is_empty() {
+                    let back: Vec<u32> = self.hidden.iter().filter(|(_, p)| **p == package).map(|(id, _)| *id).collect();
+                    for old in back {
+                        self.hidden.remove(&old);
+                        host::window_close(old);
+                    }
+                }
+                self.windows.insert(id, Win::new(title, package));
             }
             ToHost::WindowUpdate { id, title, app_id, .. } => {
                 let t = window_title(&title, &app_id, &self.apps);
@@ -777,6 +877,24 @@ impl Engine {
                 host::window_close(id);
                 self.windows.remove(&id);
             }
+            ToHost::WindowMinimize { id } => host::window_minimize(id),
+            ToHost::WindowHidden { id } => {
+                // Android hid the task: the window stays, minimized, and
+                // brings the app back when it is restored
+                match self.windows.remove(&id) {
+                    Some(w) if !w.package.is_empty() && w.placed.is_some() => {
+                        host::window_minimize(id);
+                        self.hidden.insert(id, w.package);
+                    }
+                    _ => host::window_close(id),
+                }
+            }
+            ToHost::Density { dpi } => {
+                self.dpi = dpi.max(1);
+                for w in self.windows.values_mut() {
+                    w.caption = -1.0; // set again with the next frame
+                }
+            }
             ToHost::BufferDirty { id } => {
                 for w in self.windows.values_mut() {
                     w.painted.backed.remove(&id);
@@ -790,6 +908,7 @@ impl Engine {
                     );
                 }
                 let multi = self.settings.multi_windows;
+                let (caption_px, _) = self.chrome_px();
                 if let Some(w) = self.windows.get_mut(&window) {
                     let full = Rect::new(0, 0, width as i32, height as i32);
                     // multi-window: just the app's task, where Android put it
@@ -800,7 +919,30 @@ impl Engine {
                         let geometry: Vec<(Rect, Rect)> = layers.iter().map(|l| (l.src, l.dst)).collect();
                         let bounds = match &w.crop {
                             Some((g, b)) if *g == geometry => *b,
+                            // the task only moved (the user dragged it): the
+                            // same crop, moved (a GPU buffer's pixels may not
+                            // be at hand to find it again right then)
+                            Some((g, Some(b))) if let Some((dx, dy)) = translation(g, &geometry, full) => {
+                                let b = Some(Rect::new(b.x + dx, b.y + dy, b.w, b.h));
+                                w.crop = Some((geometry, b));
+                                b
+                            }
                             _ => {
+                                // the shadows' extent is in the pixels: a GPU
+                                // buffer's must be in guest memory for that
+                                // (when QEMU reads frames straight into the
+                                // window they are not)
+                                if let Some(p) = self.present.as_mut() {
+                                    for l in &layers {
+                                        if let Some(b) = self.buffers.get(&l.buffer).filter(|b| b.resource != 0) {
+                                            if let Err(e) = p.read_whole(b) {
+                                                if debug() {
+                                                    eprintln!("airDroid: {e}");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 let b = opaque_bounds(&layers, &self.buffers).or_else(|| content_bounds(&layers));
                                 w.crop = Some((geometry, b));
                                 b
@@ -818,13 +960,47 @@ impl Engine {
                         }
                         _ => true,
                     };
-                    if let Some(area) = area.filter(|a| !a.is_empty() && settled) {
+                    // Android made the task fullscreen (its caption's
+                    // maximize button): the window zooms as air/OS windows
+                    // do instead, and the task gets that frame (ZOOM event);
+                    // the fullscreen frames are not shown meanwhile
+                    let fullscreen = multi && area == Some(full);
+                    if let Some(a) = area.filter(|_| settled) {
+                        match w.latest {
+                            Some((l, since)) if l == a => {
+                                if since.elapsed() >= Duration::from_millis(250) && a != full {
+                                    w.rested = Some(a);
+                                }
+                            }
+                            _ => w.latest = Some((a, Instant::now())),
+                        }
+                    }
+                    if !fullscreen {
+                        w.fullscreen_since = None;
+                    } else if w.fullscreen_since.is_none() && w.hold == Hold::None && w.placed.is_some_and(|p| p != full) {
+                        if debug() {
+                            eprintln!("airDroid: window {window} went fullscreen (was {:?}): zooming", w.rested);
+                        }
+                        w.fullscreen_since = Some(Instant::now());
+                        host::window_zoom(window);
+                    }
+                    let zooming = fullscreen && w.fullscreen_since.is_some_and(|t| t.elapsed() < Duration::from_secs(2));
+                    if let Some(area) = area.filter(|a| !a.is_empty() && settled && !zooming) {
                         if debug() && w.shown != Some(area) {
                             eprintln!("airDroid: window {window} shows {area:?}");
                         }
-                        match w.shown {
+                        // the user's frame holds until the task has it too
+                        let hold = match w.hold {
+                            Hold::None => false,
+                            Hold::Dragging(since) => since.elapsed() < Duration::from_secs(120),
+                            Hold::Settling(target, since) => !settled_at(area, target) && since.elapsed() < Duration::from_secs(3),
+                        };
+                        if !hold {
+                            w.hold = Hold::None;
+                        }
+                        match w.placed {
                             None => host::window_open(window, &w.title, multi.then_some((area.x, area.y)), area.w as u32, area.h as u32, multi),
-                            Some(old) => {
+                            Some(old) if !hold => {
                                 if (old.w, old.h) != (area.w, area.h) {
                                     host::window_resize(window, area.w as u32, area.h as u32);
                                 }
@@ -832,6 +1008,16 @@ impl Engine {
                                     host::window_move(window, area.x, area.y);
                                 }
                             }
+                            Some(_) => {}
+                        }
+                        if w.placed.is_none() || !hold {
+                            w.placed = Some(area);
+                        }
+                        // a fullscreen task has no caption bar
+                        let caption = if multi && area != full { caption_px } else { 0.0 };
+                        if caption != w.caption {
+                            w.caption = caption;
+                            host::window_set_caption(window, caption);
                         }
                         w.shown = Some(area);
                         // straight into the window's bitmap; through the canvas
@@ -1188,6 +1374,13 @@ impl Engine {
 
     // ---- host events --------------------------------------------------------
 
+    /// Android's caption height and the size of the task corners that take
+    /// no mouse clicks, in pixels (Android's display is the screen).
+    fn chrome_px(&self) -> (f32, f32) {
+        let scale = self.dpi as f32 / 160.0;
+        ((CAPTION_DP * scale).round(), (RESIZE_CORNER_DP * scale).ceil() + 1.0)
+    }
+
     fn send(&self, m: ToGuest) {
         if let Some(s) = &self.session {
             let _ = s.send(&m);
@@ -1200,8 +1393,9 @@ impl Engine {
         match ev.kind {
             kind::MOUSE_MOVED => {
                 let touch = self.settings.mouse_as_touch;
+                let (_, corner) = self.chrome_px();
                 if let Some(w) = self.windows.get(&win) {
-                    let (x, y) = w.to_android(ev.x, ev.y);
+                    let (x, y) = w.to_android_caption(ev.x, ev.y, corner);
                     if touch {
                         if w.touching {
                             self.send(ToGuest::Touch { window: win, id: 0, kind: TouchKind::Motion, x, y });
@@ -1213,11 +1407,12 @@ impl Engine {
             }
             kind::MOUSE_DOWN | kind::MOUSE_UP => {
                 let touch = self.settings.mouse_as_touch;
+                let (_, corner) = self.chrome_px();
                 let Some(w) = self.windows.get_mut(&win) else { return };
                 let old = w.buttons;
                 let new = ev.buttons;
                 w.buttons = new;
-                let (x, y) = w.to_android(ev.x, ev.y);
+                let (x, y) = w.to_android_caption(ev.x, ev.y, corner);
                 if touch {
                     let down = new & 1 != 0;
                     if down != w.touching {
@@ -1262,6 +1457,10 @@ impl Engine {
                 }
                 self.modifiers = ev.modifiers;
             }
+            kind::WINDOW_CLOSE if self.hidden.contains_key(&win) => {
+                self.hidden.remove(&win);
+                host::window_close(win);
+            }
             kind::WINDOW_CLOSE => self.send(ToGuest::WindowClose { id: win }),
             kind::WINDOW_RESIZED => {
                 let (w, h) = (ev.x as u32, ev.y as u32);
@@ -1272,8 +1471,47 @@ impl Engine {
                     }
                 }
             }
-            kind::TASK_BOUNDS => {
-                self.send(ToGuest::TaskBounds { id: win, x: ev.x as i32, y: ev.y as i32, width: ev.dx as u32, height: ev.dy as u32 })
+            kind::DRAG_BEGIN => {
+                if let Some(w) = self.windows.get_mut(&win) {
+                    w.hold = Hold::Dragging(Instant::now());
+                    w.unzoomed = None;
+                }
+            }
+            kind::TASK_BOUNDS | kind::ZOOM => {
+                // the user moved or resized the window, or Android's caption
+                // asked to maximize it: ZOOM has the frame air/OS gives a
+                // zoomed window; zoomed already, it goes back instead
+                let mut frame = Rect::new(ev.x as i32, ev.y as i32, ev.dx as i32, ev.dy as i32);
+                let Some(w) = self.windows.get_mut(&win) else { return };
+                if ev.kind == kind::ZOOM {
+                    match w.unzoomed.take() {
+                        Some(before) => frame = before,
+                        None => w.unzoomed = w.rested.or(w.placed),
+                    }
+                    if debug() {
+                        eprintln!("airDroid: window {win} zooms to {frame:?} (back to {:?})", w.unzoomed);
+                    }
+                    host::window_move(win, frame.x, frame.y);
+                    host::window_resize(win, frame.w as u32, frame.h as u32);
+                }
+                w.hold = Hold::Settling(frame, Instant::now());
+                if debug() {
+                    eprintln!("airDroid: window {win} gets {frame:?} (fullscreen: {})", w.fullscreen_since.is_some());
+                }
+                if ev.kind == kind::ZOOM && w.fullscreen_since.is_some() {
+                    // Android made the task fullscreen: freeform again
+                    // (Waydroid's F11), then the zoomed bounds
+                    for pressed in [true, false] {
+                        self.send(ToGuest::Key { window: win, code: KEY_F11, pressed });
+                    }
+                }
+                self.send(ToGuest::TaskBounds { id: win, x: frame.x, y: frame.y, width: frame.w as u32, height: frame.h as u32 })
+            }
+            kind::WINDOW_ACTIVATED if self.hidden.contains_key(&win) => {
+                // restored from the Deskbar: Android shows the app again
+                // (its new window replaces this one)
+                let package = self.hidden[&win].clone();
+                self.request(Pending::Launch(package));
             }
             kind::WINDOW_ACTIVATED => self.send(ToGuest::Focus { window: Some(win) }),
             kind::WINDOW_DEACTIVATED => {}
@@ -1449,6 +1687,38 @@ fn display_name(a: &AppInfo) -> String {
     }
 }
 
+/// Whether Android's task (`area`) has the frame the user gave the window
+/// (`target`): that one, or with its top lower down, as Android keeps
+/// tasks below its status bar's place (the guest then keeps the bottom).
+fn settled_at(area: Rect, target: Rect) -> bool {
+    area == target
+        || (area.x, area.w, area.y + area.h) == (target.x, target.w, target.y + target.h) && area.y > target.y && area.y < target.y + 64
+}
+
+/// The offset by which the layers (sources, destinations) of `b` sit from
+/// where they were in `a`, if that is all that changed: same sources and
+/// sizes, one offset. Layers covering the whole display (`full`, the
+/// multi-window background) stay where they are.
+fn translation(a: &[(Rect, Rect)], b: &[(Rect, Rect)], full: Rect) -> Option<(i32, i32)> {
+    if a.len() != b.len() {
+        return None;
+    }
+    let mut offset = None;
+    for ((sa, da), (sb, db)) in a.iter().zip(b) {
+        if sa != sb || (da.w, da.h) != (db.w, db.h) {
+            return None;
+        }
+        if *da == full && *db == full {
+            continue;
+        }
+        let d = (db.x - da.x, db.y - da.y);
+        if *offset.get_or_insert(d) != d {
+            return None;
+        }
+    }
+    offset
+}
+
 fn window_title(title: &str, app_id: &str, apps: &[AppInfo]) -> String {
     if !title.is_empty() && title != "Waydroid" {
         return title.to_string();
@@ -1525,5 +1795,55 @@ mod data_aside_tests {
         assert!(!disk.exists());
         assert_eq!(std::fs::read(dir.join(&kept)).unwrap(), b"old");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod caption_tests {
+    use super::*;
+
+    #[test]
+    fn clicks_in_the_caption_corners_reach_the_buttons() {
+        // a task at 100,50 of 900x600; 47 px caption, 26 px corners (180 dpi)
+        let mut w = Win::new("Settings".into(), "com.android.settings".into());
+        w.shown = Some(Rect::new(100, 50, 900, 600));
+        w.caption = 47.0;
+        // window coordinates in, Android's out
+        assert_eq!(w.to_android_caption(875.0, 20.0, 26.0), (973.0, 70.0)); // close: moved left
+        assert_eq!(w.to_android_caption(880.0, 30.0, 26.0), (980.0, 80.0)); // below the corner
+        assert_eq!(w.to_android_caption(20.0, 20.0, 26.0), (126.0, 70.0)); // back: moved right
+        assert_eq!(w.to_android_caption(450.0, 10.0, 26.0), (550.0, 60.0)); // the middle
+        assert_eq!(w.to_android_caption(890.0, 590.0, 26.0), (990.0, 640.0)); // bottom corner: as is
+        w.caption = 0.0; // fullscreen: no caption
+        assert_eq!(w.to_android_caption(875.0, 20.0, 26.0), (975.0, 70.0));
+    }
+
+    #[test]
+    fn settling() {
+        let r = Rect::new;
+        let zoom = r(0, 0, 1784, 1080);
+        assert!(settled_at(zoom, zoom));
+        assert!(settled_at(r(0, 32, 1784, 1048), zoom)); // below Android's status bar
+        assert!(!settled_at(r(0, 32, 1784, 1080), zoom)); // moved down whole
+        assert!(!settled_at(r(428, 117, 464, 803), zoom)); // not yet
+    }
+
+    #[test]
+    fn moved_layers() {
+        let r = Rect::new;
+        let a = vec![(r(0, 0, 1920, 1080), r(0, 0, 1920, 1080)), (r(0, 0, 488, 848), r(716, 100, 488, 848))];
+        let full = r(0, 0, 1920, 1080);
+        let mut b = a.clone();
+        assert_eq!(translation(&a, &b, full), Some((0, 0)));
+        b[1].1 = r(316, 265, 488, 848); // the background stays
+        assert_eq!(translation(&a, &b, full), Some((-400, 165)));
+        let mut c = b.clone();
+        c.push((r(0, 0, 10, 10), r(0, 0, 10, 10)));
+        assert_eq!(translation(&a, &c, full), None); // another layer
+        b[1].1.w = 500;
+        assert_eq!(translation(&a, &b, full), None); // resized
+        let two = vec![a[1], (r(0, 0, 50, 50), r(800, 100, 50, 50))];
+        let moved = vec![(a[1].0, r(720, 100, 488, 848)), (two[1].0, r(800, 100, 50, 50))];
+        assert_eq!(translation(&two, &moved, full), None); // not all of it
     }
 }

@@ -288,6 +288,23 @@ pub enum ToHost {
     BufferDirty {
         id: u32,
     },
+    /// Window `id` is gone because Android hid its app's task (the
+    /// caption's minimize button), not because the task ended: the host
+    /// keeps the window minimized; the task shows again when the app is
+    /// started (a new window). Sent instead of [`ToHost::WindowDestroy`].
+    WindowHidden {
+        id: u32,
+    },
+    /// Android asks for window `id` to be minimized (the caption's minimize
+    /// button, through Waydroid's hwcomposer: xdg_toplevel.set_minimized).
+    WindowMinimize {
+        id: u32,
+    },
+    /// Android's display density (dots per inch; 160 is one pixel per
+    /// density-independent pixel), once Android is up.
+    Density {
+        dpi: u32,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]

@@ -343,6 +343,7 @@ fn boot(link: &HostLink, cfg: &container::Config, inbox: &Arc<compositor::Inbox>
                 }
                 if exec::getprop("sys.boot_completed") == "1" {
                     let _ = multi;
+                    link.send(&ToHost::Density { dpi: apps::density() });
                     status(&link, BootStage::Booted, &format!("Android booted in {:.1} s", start.elapsed().as_secs_f32()));
                     apps::prepare_desktop();
                     apps::follow_timezone(&tz);
