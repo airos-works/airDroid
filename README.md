@@ -18,7 +18,7 @@ air/OS:
   NVK, AMD with RADV and Intel with ANV).
 
 What works, as in Waydroid: installing apps from `.apk` files (open one,
-or `airdroid app install`) and, beyond Waydroid, from the bundles stores
+drop it on airDroid's window, or `airdroid app install`) and, beyond Waydroid, from the bundles stores
 hand out for apps that come as several APKs (`.apkm`, `.xapk`, `.apks`),
 each app in its own resizable window or the
 whole Android UI in one, Deskbar entries for Android apps, keyboard, mouse

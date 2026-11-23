@@ -10,7 +10,8 @@
 * Input: mouse (buttons, wheel), keyboard (Linux key codes, modifiers),
   optional mouse-as-touch.
 * Apps: install `.apk` files and app bundles (`.apkm`, `.xapk`, `.apks`;
-  Tracker, the file panel, `airdroid app install`; see "App bundles"),
+  opened in Tracker, dropped on airDroid's window, the file panel,
+  `airdroid app install`; see "App bundles"),
   launch, list with names and icons, Deskbar launchers (Applications ›
   Android apps), remove.
 * Audio output (PulseAudio protocol in the guest, Media Kit on air/OS).
