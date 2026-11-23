@@ -91,7 +91,12 @@
   inside the task, where clicks and touches go nowhere), so clicks there
   move sideways out of the corner onto the same button. A task Android
   hides (its own minimize fallback) leaves its window minimized; restoring
-  it starts the app again. Android's windows take the first click (their
+  it starts the app again. A task that is being closed is listed like a
+  hidden one for a moment (still there, not visible) just when its window
+  goes, so the guest looks again 0.6 s later before it calls a task
+  hidden: without that the caption's close button left the window behind,
+  minimized, and restoring it started the app again (0.1.0-183).
+  Android's windows take the first click (their
   caption is their title bar), and the pointer's position reaches Android
   when it enters a window (Waydroid's hwcomposer ignores enter's
   coordinates, so a click right after entering went to the old position).

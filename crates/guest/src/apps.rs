@@ -487,7 +487,7 @@ pub fn density() -> u32 {
 /// away because the caption's minimize button moved it out of sight),
 /// rather than none (the app was closed, or finished).
 pub fn task_hidden(package: &str) -> bool {
-    match tasks() {
+    let hidden = || match tasks() {
         Ok(t) => {
             let mine: Vec<&Task> = t.iter().filter(|t| t.package == package).collect();
             !mine.is_empty() && mine.iter().all(|t| !t.visible)
@@ -496,6 +496,12 @@ pub fn task_hidden(package: &str) -> bool {
             logf!("tasks of {package}: {e}");
             false
         }
+    };
+    // A task that is being closed is still listed for a moment, out of
+    // sight, when its window goes: a hidden one is still there after that.
+    hidden() && {
+        std::thread::sleep(Duration::from_millis(600));
+        hidden()
     }
 }
 
