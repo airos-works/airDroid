@@ -3,7 +3,7 @@
 //!   airdroid status
 //!   airdroid shell [-u UID] [--vm] COMMAND...   run in Android (as root) or the VM
 //!   airdroid logcat [ARGS...]
-//!   airdroid app install FILE.apk | remove PACKAGE | launch PACKAGE | list
+//!   airdroid app install FILE (.apk, .apkm, .xapk, .apks) | remove PACKAGE | launch PACKAGE | list
 //!   airdroid app intent ACTION [URI]
 //!   airdroid show-full-ui
 //!   airdroid prop get KEY | prop set KEY VALUE
@@ -24,7 +24,7 @@ fn state_dir() -> PathBuf {
 fn usage() -> ! {
     let _ = writeln!(std::io::stderr(), 
         "usage: airdroid status | shell [-u UID] [--vm] COMMAND... | logcat [ARGS...]\n\
-         \x20      | app install FILE.apk | app remove PACKAGE | app launch PACKAGE | app list\n\
+         \x20      | app install FILE | app remove PACKAGE | app launch PACKAGE | app list\n\
          \x20      | app intent ACTION [URI] | show-full-ui | prop get KEY | prop set KEY VALUE | upgrade | stop"
     );
     std::process::exit(2)

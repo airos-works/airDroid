@@ -5,8 +5,8 @@ summary			"Android apps on air/OS"
 description		"airDroid runs Android apps on air/OS, like Waydroid does on Linux: \
 LineageOS 20 (Waydroid's images, downloaded on first start) runs in a small \
 Linux VM under NVMM, and each Android app gets its own window. Install apps \
-by opening their .apk files; they appear in Deskbar under Applications \
-› Android apps."
+by opening their .apk files or bundles (.apkm, .xapk, .apks); they appear \
+in Deskbar under Applications › Android apps."
 packager		"air/OS <airos@airos.works>"
 vendor			"air/OS"
 copyrights {

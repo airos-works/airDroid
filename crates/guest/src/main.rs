@@ -8,6 +8,7 @@
 
 mod apps;
 mod binder;
+mod bundle;
 mod platform;
 mod pulse;
 mod compositor;

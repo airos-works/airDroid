@@ -9,9 +9,10 @@
   (Waydroid's multi-window mode, the default).
 * Input: mouse (buttons, wheel), keyboard (Linux key codes, modifiers),
   optional mouse-as-touch.
-* Apps: install `.apk` files (Tracker, the file panel, `airdroid app
-  install`), launch, list with names and icons, Deskbar launchers
-  (Applications › Android apps), remove.
+* Apps: install `.apk` files and app bundles (`.apkm`, `.xapk`, `.apks`;
+  Tracker, the file panel, `airdroid app install`; see "App bundles"),
+  launch, list with names and icons, Deskbar launchers (Applications ›
+  Android apps), remove.
 * Audio output (PulseAudio protocol in the guest, Media Kit on air/OS).
 * Networking (QEMU user networking; Android sees Ethernet).
 * Time zone: Android follows air/OS's (BTimeZone, `airdroid.tz=` on the
@@ -114,6 +115,71 @@ system update.
 * A later stop of the machine with Android running (the same fault)
   left Android unable to start; see "Android's data after a crash".
   With the repair there it boots in 11 s on the same data disk.
+
+## App bundles (.apkm, .xapk, .apks; 2026-11-23)
+
+Most apps are published as Android App Bundles, and a store hands a device
+the base APK and the configuration splits that device needs. Sites that
+mirror apps pack those into one zip file: APKMirror's `.apkm` (`base.apk`,
+`split_config.<what>.apk`), APKPure's `.xapk` (`<package>.apk`,
+`config.<what>.apk`, sometimes expansion files under `Android/obb`) and
+`.apks` (the same, or bundletool's `splits/base-master.apk`,
+`splits/base-<what>.apk`). The base APK of such an app alone does not
+install (`INSTALL_FAILED_MISSING_SPLIT`).
+
+airDroid installs these as they are. Tools like AntiSplit-M merge the splits
+into one APK instead, which then has to be signed with another key: the
+app no longer takes updates from its store's builds and apps that check
+their signature stop working. Android itself installs splits, so the guest
+(`crates/guest/src/bundle.rs`) does what a store's installer does:
+
+* reads the zip's directory; a zip with an `AndroidManifest.xml` is an APK
+  and installed as before, whatever its name;
+* chooses the APKs for this device: every module's own APK, and of each
+  module's configuration splits the one for the best processor type of
+  `ro.product.cpu.abilist`, the one for the smallest density that is at
+  least the display's (else the largest), those for the languages of
+  `persist.sys.locale`, and any split whose configuration it does not know;
+* unpacks those, and installs them in one session of the package installer
+  (`pm install-create`, `install-write` per APK, `install-commit`), the
+  way `adb install-multiple` does;
+* unpacks an `.xapk`'s expansion files to `/sdcard/Android/obb/<package>`,
+  owned as Android's storage service makes that directory (the app's user,
+  group `ext_obb_rw`).
+
+A bundle whose code is for other processors only (most of APKPure's are
+`arm64-v8a` only; airDroid's Android is x86_64 without a translator for ARM
+code) is refused before anything is installed, with the processor types it
+has; Android would install it and the app would crash at start. The
+installer's other failures a user can act on are said in words (a lone base
+APK, another signature than the installed app's, a downgrade, a full disk),
+with Android's own text after them.
+
+Names from a bundle are untrusted: ones that would leave the directory they
+are unpacked to (`..`, a leading `/`) or be taken for an option of `unzip`
+are left out.
+
+Tracker knows the bundles as "Android app bundle"
+(`application/x-vnd.android.app-bundle`, airDroid preferred). The registrar
+goes by a file's contents before its name, and a bundle is a zip: the type's
+rule recognizes the ones that start with an entry these formats start with;
+any other is typed as a zip archive and opens with Open with › airDroid, the
+app's Install App… or `airdroid app install`.
+
+Tests: the choice of splits, the zip reader and the name checks have unit
+tests (`cargo test -p airdroid-guest bundle`). `tools/dev/test-bundle/build.sh`
+builds a small app (a `NativeActivity` whose only code is a library per
+processor type, icons in four densities, strings in three languages) as an
+App Bundle and, with bundletool, as `.apks`, `.apkm` and `.xapk` with an
+expansion file. On Linux/KVM and on the X399 all three install (3 of 13
+APKs: base, x86_64, tvdpi), `pm path` lists the three, the app starts (it
+cannot without the x86_64 split) and the expansion file is in place.
+APKPure's Wikipedia `.xapk` (arm64-v8a only) is refused as said above, and
+its base APK alone gives the "one part of the app" message.
+
+Not done: an `.apkm` in APKMirror's old encrypted format (the site has not
+made those for years; the message says to download it again), and bundles
+inside bundles.
 
 ## Android's data after a crash
 

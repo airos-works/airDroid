@@ -1,7 +1,8 @@
 # airDroid
 
 Android apps on air/OS. airDroid does what [Waydroid](https://github.com/waydroid/waydroid)
-does on Linux (a full LineageOS Android, apps installed from `.apk` files,
+does on Linux (a full LineageOS Android, apps installed from `.apk` files
+and split-APK bundles,
 each app in its own desktop window or the whole Android UI in one), built for
 air/OS:
 
@@ -17,7 +18,9 @@ air/OS:
   NVK, AMD with RADV and Intel with ANV).
 
 What works, as in Waydroid: installing apps from `.apk` files (open one,
-or `airdroid app install`), each app in its own resizable window or the
+or `airdroid app install`) and, beyond Waydroid, from the bundles stores
+hand out for apps that come as several APKs (`.apkm`, `.xapk`, `.apks`),
+each app in its own resizable window or the
 whole Android UI in one, Deskbar entries for Android apps, keyboard, mouse
 and touch, the clipboard both ways, sound and the microphone, Android's
 notifications on the desktop, networking, a shared folder (`~/Android` is

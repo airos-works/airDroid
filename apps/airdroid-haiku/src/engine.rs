@@ -646,7 +646,7 @@ impl Engine {
                 "--stop" => {
                     self.stop_vm();
                 }
-                p if p.ends_with(".apk") => {
+                p if installable(p) => {
                     self.request(Pending::Install(PathBuf::from(p)));
                 }
                 _ => {}
@@ -1277,10 +1277,13 @@ impl Engine {
             kind::WINDOW_ACTIVATED => self.send(ToGuest::Focus { window: Some(win) }),
             kind::WINDOW_DEACTIVATED => {}
             kind::REFS => {
-                if e.text.ends_with(".apk") || e.text.ends_with(".APK") {
+                if installable(&e.text) {
                     self.request(Pending::Install(PathBuf::from(&e.text)));
                 } else {
-                    host::alert("airDroid", &format!("{} is not an Android app (.apk).", e.text));
+                    host::alert(
+                        "airDroid",
+                        &format!("{} is not an Android app (an .apk file, or an .apkm, .xapk or .apks bundle).", e.text),
+                    );
                 }
             }
             kind::ARGV => {
@@ -1365,6 +1368,13 @@ fn debug_log(text: &str) {
     if debug() {
         eprintln!("airDroid: {text}");
     }
+}
+
+/// Whether a file is something to install by its name: an APK, or an app as
+/// a bundle of split APKs (the guest looks at the contents).
+fn installable(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [".apk", ".apkm", ".xapk", ".apks"].iter().any(|ext| lower.ends_with(ext))
 }
 
 /// The audio input is started again when it has delivered nothing for this

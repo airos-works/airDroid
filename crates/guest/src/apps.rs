@@ -6,6 +6,7 @@ use crate::exec;
 use crate::hostlink::HostLink;
 use crate::logf;
 use airdroid_proto::{AppInfo, ToHost};
+use std::os::unix::fs::MetadataExt;
 use std::time::Duration;
 
 pub enum Action {
@@ -156,16 +157,157 @@ fn wake() {
     let _ = shell_user(&["/system/bin/cmd", "statusbar", "collapse"]);
 }
 
+const AID_MEDIA_RW: u32 = 1023;
+const AID_EXT_OBB_RW: u32 = 1079;
+
+/// Gives a directory of Android's shared storage and all in it to `uid` and
+/// `gid`, with the modes such directories have there.
+fn own(path: &std::path::Path, uid: u32, gid: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        return Ok(());
+    }
+    std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
+    if meta.is_dir() {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o2770))?;
+        for entry in std::fs::read_dir(path)? {
+            own(&entry?.path(), uid, gid)?;
+        }
+    } else {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
+    }
+    Ok(())
+}
+
+/// Says in words what Android's package installer answered in a code, for
+/// the failures a user can do something about; Android's own text follows.
+fn explain(failure: String) -> String {
+    let said = [
+        (
+            "INSTALL_FAILED_MISSING_SPLIT",
+            "This file is only one part of the app: the app comes as several APKs. Get it as a bundle (.apkm, .xapk or .apks) and install that.",
+        ),
+        ("INSTALL_FAILED_NO_MATCHING_ABIS", "This app has no code for this computer's processor (it is built for ARM phones only)."),
+        (
+            "INSTALL_FAILED_UPDATE_INCOMPATIBLE",
+            "The app is already installed from another source, signed with another key. Remove the installed one first (its data goes with it).",
+        ),
+        ("INSTALL_FAILED_VERSION_DOWNGRADE", "A newer version of this app is installed already."),
+        ("INSTALL_FAILED_OLDER_SDK", "This app needs a newer Android than airDroid's (Android 13)."),
+        ("INSTALL_FAILED_INSUFFICIENT_STORAGE", "Android's data disk is full."),
+        ("INSTALL_PARSE_FAILED_NO_CERTIFICATES", "The app is not signed (a bundle that was merged or changed has to be signed again)."),
+        ("INSTALL_FAILED_INVALID_APK", "Android does not take this app's packages as one app (a split may be missing or of another version)."),
+    ];
+    match said.iter().find(|(code, _)| failure.contains(code)) {
+        Some((_, words)) => format!("{words}\n\n{failure}"),
+        None => failure,
+    }
+}
+
+/// Installs an app that comes as a base APK and splits in one zip file
+/// (.apkm, .xapk, .apks): the APKs this device uses, in one session of
+/// Android's package installer, as `adb install-multiple` does. The app
+/// stays signed as its makers signed it.
+fn install_bundle(bundle: &str, apks: &[String], entries: &[String]) -> Result<String, String> {
+    let locales = [exec::getprop("persist.sys.locale"), exec::getprop("ro.product.locale")].join(",");
+    let density = match exec::getprop("ro.sf.lcd_density") {
+        d if d.is_empty() => shell_user(&["/system/bin/wm", "density"]).unwrap_or_default(),
+        d => d,
+    };
+    let device = crate::bundle::Device::new(&exec::getprop("ro.product.cpu.abilist"), &density, &locales);
+    let chosen = crate::bundle::choose(apks, &device)?;
+    logf!("bundle {bundle}: {} of {} APKs for {device:?}: {}", chosen.len(), apks.len(), chosen.join(", "));
+
+    let dir = format!("{bundle}.d");
+    let _ = sh(&["/system/bin/rm", "-rf", &dir]);
+    let cleanup = |r: Result<String, String>| {
+        let _ = sh(&["/system/bin/rm", "-rf", &dir]);
+        r
+    };
+    let mut unzip = vec!["/system/bin/unzip", "-o", "-q", bundle];
+    unzip.extend(chosen.iter().map(String::as_str));
+    unzip.extend(["-d", &dir]);
+    if let Err(e) = sh(&unzip) {
+        return cleanup(Err(format!("the bundle could not be unpacked: {e}")));
+    }
+
+    let here = |path: &str| format!("{}/{}", container::DATA_DISK, path.trim_start_matches('/'));
+    let mut sizes = Vec::new();
+    for name in &chosen {
+        match std::fs::metadata(here(&format!("{dir}/{name}"))) {
+            Ok(m) => sizes.push(m.len()),
+            Err(e) => return cleanup(Err(format!("{name} of the bundle: {e}"))),
+        }
+    }
+    let total: u64 = sizes.iter().sum();
+
+    // "Success: created install session [1234]"
+    let created = match sh(&["/system/bin/pm", "install-create", "-r", "-g", "-S", &total.to_string()]) {
+        Ok(out) => out,
+        Err(e) => return cleanup(Err(e)),
+    };
+    let Some(session) = created.split('[').nth(1).and_then(|s| s.split(']').next()).filter(|s| s.parse::<u32>().is_ok())
+    else {
+        return cleanup(Err(format!("no install session: {created}")));
+    };
+    let abandon = |e: String| {
+        let _ = sh(&["/system/bin/pm", "install-abandon", session]);
+        Err(e)
+    };
+    for (i, (name, size)) in chosen.iter().zip(&sizes).enumerate() {
+        let written = sh(&["/system/bin/pm", "install-write", "-S", &size.to_string(), session, &format!("{i}.apk"), &format!("{dir}/{name}")]);
+        match written {
+            Ok(out) if out.contains("Success") => {}
+            Ok(out) => return cleanup(abandon(format!("{name}: {out}"))),
+            Err(e) => return cleanup(abandon(format!("{name}: {e}"))),
+        }
+    }
+    let committed = match sh(&["/system/bin/pm", "install-commit", session]) {
+        Ok(out) if out.contains("Success") => out,
+        Ok(out) => return cleanup(abandon(out)),
+        Err(e) => return cleanup(abandon(e)),
+    };
+
+    // an .xapk's expansion files, to where the app looks for them
+    let obb = crate::bundle::expansion_files(entries);
+    if !obb.is_empty() {
+        let mut unzip = vec!["/system/bin/unzip", "-o", "-q", bundle];
+        unzip.extend(obb.iter().map(String::as_str));
+        unzip.extend(["-d", "/data/media/0"]);
+        match sh(&unzip) {
+            Ok(_) => logf!("bundle {bundle}: {} expansion file(s) to /sdcard/Android/obb", obb.len()),
+            Err(e) => logf!("bundle {bundle}: its expansion files: {e}"),
+        }
+        // owned as Android's storage service makes an app's directory: the
+        // app's, for the group that may read all of them
+        for package in crate::bundle::expansion_packages(&obb) {
+            let owner = std::fs::metadata(here(&format!("/data/data/{package}"))).map(|m| m.uid()).unwrap_or(AID_MEDIA_RW);
+            if let Err(e) = own(std::path::Path::new(&here(&format!("/data/media/0/Android/obb/{package}"))), owner, AID_EXT_OBB_RW) {
+                logf!("bundle {bundle}: owner of {package}'s expansion files: {e}");
+            }
+        }
+    }
+    cleanup(Ok(committed))
+}
+
 fn run(link: &HostLink, action: Action) -> Result<String, String> {
     if matches!(action, Action::Launch(_) | Action::FullUi | Action::Intent(..)) {
         wake();
     }
     match action {
         Action::Install(path) => {
-            let out = sh(&["/system/bin/pm", "install", "-r", "-g", &path])?;
-            let _ = std::fs::remove_file(format!("{}/{}", container::DATA_DISK, path.trim_start_matches('/')));
+            // the file as this process sees it (Android's /data is on the
+            // data disk)
+            let here = format!("{}/{}", container::DATA_DISK, path.trim_start_matches('/'));
+            let result = match crate::bundle::inspect(&here) {
+                Ok(crate::bundle::Package::Apk) => sh(&["/system/bin/pm", "install", "-r", "-g", &path]),
+                Ok(crate::bundle::Package::Bundle { apks, entries }) => install_bundle(&path, &apks, &entries),
+                Err(e) => Err(e),
+            };
+            let _ = std::fs::remove_file(&here);
             list(link);
-            Ok(out)
+            result.map_err(explain)
         }
         Action::Remove(package) => {
             // as the shell user: as root, pm's AppOps check finds no calling
