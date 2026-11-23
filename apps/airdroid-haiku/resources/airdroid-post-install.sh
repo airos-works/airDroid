@@ -29,4 +29,15 @@ setmime -dump "$bundle" 2>/dev/null | grep -q -- -preferredAppSig \
 # Tracker until airDroid has run once.
 setmime -set "$type" -sniffRule '0.60 [0] ("PK\003\004") [30] ("AndroidManifest.xml" | "META-INF/com/android/build/" | "classes.dex" | "resources.arsc")'
 setmime -set "$bundle" -sniffRule '0.55 [0] ("PK\003\004") ([60:8192] "META-INF/APKMIRRO" | [30:130] ".apk" | [30] "split_config." | [30] "toc.pb" | [30] "splits/base-" | [30] "meta.sai_v" | [30] "Android/obb/")'
+# Files that were on the disk before these rules keep the type they were
+# given then (a zip or a Java archive), and a double click on them does not
+# reach airDroid. Those named like an app are identified again; a type that
+# somebody chose for a file is left alone.
+query -a -e -f '((name=="*.apkm")||(name=="*.xapk")||(name=="*.apks")||(name=="*.apk"))' 2>/dev/null \
+| while IFS= read -r file; do
+	case "$(catattr -d BEOS:TYPE "$file" 2>/dev/null | tr -d '\0')" in
+	application/zip|application/java-archive|application/octet-stream|"")
+		mimeset -F "$file" 2>/dev/null ;;
+	esac
+done
 exit 0
