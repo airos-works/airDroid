@@ -95,6 +95,8 @@ pub struct VmConfig {
     pub host_present: bool,
     /// The host's time zone (an Olson ID) for Android to follow.
     pub timezone: Option<String>,
+    /// The host's language (a BCP 47 tag, "en-AU") for Android to start in.
+    pub locale: Option<String>,
 }
 
 impl VmConfig {
@@ -140,6 +142,12 @@ impl VmConfig {
                 .as_deref()
                 .filter(|z| !z.is_empty() && z.chars().all(|c| c.is_ascii_alphanumeric() || "/_+-".contains(c)))
                 .map(|z| format!(" airdroid.tz={z}"))
+                .unwrap_or_default()
+            + &self
+                .locale
+                .as_deref()
+                .filter(|l| !l.is_empty() && l.len() <= 35 && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+                .map(|l| format!(" airdroid.locale={l}"))
                 .unwrap_or_default();
         let mut a: Vec<String> = Vec::new();
         let mut push = |v: &[&str]| a.extend(v.iter().map(|s| s.to_string()));
@@ -470,12 +478,24 @@ mod tests {
             share: None,
             host_present: false,
             timezone: timezone.map(str::to_string),
+            locale: None,
         }
     }
     fn cmdline(c: &VmConfig) -> String {
         let a = c.args();
         let i = a.iter().position(|x| x == "-append").unwrap();
         a[i + 1].clone()
+    }
+
+    #[test]
+    fn language_goes_on_the_command_line() {
+        let with = |locale: &str| cmdline(&VmConfig { locale: Some(locale.into()), ..config(Some("Australia/Sydney")) });
+        assert!(with("en-AU").ends_with(" airdroid.tz=Australia/Sydney airdroid.locale=en-AU"));
+        assert!(with("zh-Hans-CN").ends_with(" airdroid.locale=zh-Hans-CN"));
+        // nothing that could add kernel arguments
+        assert!(!with("en init=/bin/sh").contains("airdroid.locale"));
+        assert!(!with("en_AU").contains("airdroid.locale"));
+        assert!(!with("").contains("airdroid.locale"));
     }
 
     #[test]

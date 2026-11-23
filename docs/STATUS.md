@@ -17,6 +17,15 @@
 * Networking (QEMU user networking; Android sees Ethernet).
 * Time zone: Android follows air/OS's (BTimeZone, `airdroid.tz=` on the
   guest command line; `cmd alarm set-timezone` after boot).
+* Language: Android starts in air/OS's (the first preferred language, with
+  the country of the formatting conventions where the language names none;
+  `airdroid.locale=` on the kernel command line, `ro.product.locale` in
+  waydroid.prop, which goes before the system's en-US). It is Android's
+  default only: a language chosen in Android's settings is saved there and
+  wins. App names, the Deskbar entries and the language splits of an app
+  bundle follow. Tried on Linux/KVM with de-DE (German names, the `de`
+  split of the test bundle, French with `persist.sys.locale=fr-FR`,
+  English without) and on the X399 (set to plain `en`: Android has `en`).
 * Clipboard both ways (implemented; not yet verified on air/OS).
 * `airdroid` command: status, shell, logcat, app …, prop, stop.
 

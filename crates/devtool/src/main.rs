@@ -100,6 +100,7 @@ fn main() {
         // reads frames from guest RAM
         host_present: false,
         timezone: None,
+        locale: arg(&args, "--locale"),
     };
     eprintln!("dev: qemu {}", cfg.args().join(" "));
     let mut child = cfg.spawn().expect("start qemu");
