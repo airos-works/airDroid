@@ -606,6 +606,12 @@ machine's Android after the hang above). airDroid now sets
 * Toasts and system dialogs in multi-window mode: they belong to no app's
   task, so (as in Waydroid) no window shows them; crash and "not
   responding" dialogs are turned off there so they cannot hold the focus.
+  Looked at on 2026-11-23: Waydroid's hwcomposer
+  (`modes/multi-window.cpp`, `get_window`) gives a window only to layers
+  named after a task and to the input method and drops the rest, so
+  showing toasts needs a hwcomposer of our own. Their text is not to be
+  had cheaply either: SystemUI's `ToastLog` buffer reaches logcat only
+  with `ro.debuggable=1` (it is 0 here), and `uiautomator` is killed.
 * ARM64 (Waydroid's arm64 images and QEMU under TCG would work but slowly;
   no NVMM there).
 * AMD hosts: see "On real hardware" above.
