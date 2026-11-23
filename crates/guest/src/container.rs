@@ -46,11 +46,13 @@ pub struct Config {
     pub gpu: String,
     /// The host's time zone (Olson ID), or empty.
     pub tz: String,
+    /// The host's language (BCP 47 tag), or empty.
+    pub locale: String,
 }
 
 impl Config {
     pub fn from_cmdline(cmdline: &str) -> Config {
-        let mut c = Config { width: 1280, height: 800, dpi: 0, multi_windows: true, gpu: "none".into(), tz: String::new() };
+        let mut c = Config { width: 1280, height: 800, dpi: 0, multi_windows: true, gpu: "none".into(), tz: String::new(), locale: String::new() };
         for word in cmdline.split_whitespace() {
             let Some(kv) = word.strip_prefix("airdroid.") else { continue };
             let Some((k, v)) = kv.split_once('=') else { continue };
@@ -61,6 +63,7 @@ impl Config {
                 "multiwin" => c.multi_windows = v == "1",
                 "gpu" => c.gpu = v.to_string(),
                 "tz" => c.tz = v.to_string(),
+                "locale" => c.locale = v.to_string(),
                 _ => {}
             }
         }
@@ -419,6 +422,13 @@ pub fn make_props(cfg: &Config, extra: &[(String, String)]) -> String {
         // a new data disk starts in the host's zone (afterwards Android's
         // saved one wins: apps::follow_timezone)
         set("persist.sys.timezone", &cfg.tz);
+    }
+    if !cfg.locale.is_empty() {
+        // Android's language when none was chosen in Android: the host's.
+        // (This file is read after the system's build.prop, which says
+        // en-US; a language chosen in Android's settings is saved as
+        // persist.sys.locale and goes before both.)
+        set("ro.product.locale", &cfg.locale);
     }
     for (k, v) in extra {
         props.retain(|(pk, _)| pk != k);

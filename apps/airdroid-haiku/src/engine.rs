@@ -519,6 +519,7 @@ impl Engine {
             share,
             host_present: true,
             timezone: host::timezone(),
+            locale: host::locale(),
         };
         if cfg.accel == Accel::Tcg {
             self.status("Starting Android (no hardware virtualization: this will be slow)…");

@@ -105,6 +105,7 @@ mod ffi {
         pub fn ad_make_launcher(path: *const libc::c_char, app: *const libc::c_char, package: *const libc::c_char, png: *const u8, len: usize) -> i32;
         pub fn ad_app_path(buf: *mut libc::c_char, len: usize) -> i32;
         pub fn ad_timezone(buf: *mut libc::c_char, len: usize) -> i32;
+        pub fn ad_locale(buf: *mut libc::c_char, len: usize) -> i32;
         pub fn ad_screen_size(w: *mut i32, h: *mut i32) -> f32;
         pub fn ad_register_types(signature: *const libc::c_char);
         pub fn ad_audio_open(id: u32, rate: u32, channels: u32);
@@ -254,6 +255,16 @@ mod imp {
             Some(std::ffi::CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned())
         }
     }
+    /// air/OS's first preferred language with its country, a BCP 47 tag.
+    pub fn locale() -> Option<String> {
+        let mut buf = vec![0 as libc::c_char; 64];
+        unsafe {
+            if ffi::ad_locale(buf.as_mut_ptr(), buf.len()) != 0 {
+                return None;
+            }
+            Some(std::ffi::CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned())
+        }
+    }
     pub fn app_path() -> Option<String> {
         let mut buf = vec![0 as libc::c_char; 1024];
         unsafe {
@@ -361,6 +372,12 @@ mod imp {
     pub fn clipboard_set(text: &str) {}
     pub fn make_launcher(path: &std::path::Path, app: &str, package: &str, png: Option<&[u8]>) -> bool {
         false
+    }
+    /// The host's language, from the environment ("en_AU.UTF-8" is "en-AU").
+    pub fn locale() -> Option<String> {
+        let lang = std::env::var("LC_ALL").or_else(|_| std::env::var("LANG")).ok()?;
+        let tag = lang.split(['.', '@']).next()?.replace('_', "-");
+        (tag.len() >= 2 && tag != "C" && tag != "POSIX").then_some(tag)
     }
     /// The host's time zone: /etc/localtime's target under zoneinfo/.
     pub fn timezone() -> Option<String> {

@@ -27,6 +27,9 @@
 #include <GroupLayoutBuilder.h>
 #include <LayoutBuilder.h>
 #include <ListView.h>
+#include <FormattingConventions.h>
+#include <Language.h>
+#include <Locale.h>
 #include <LocaleRoster.h>
 #include <Menu.h>
 #include <MenuBar.h>
@@ -2026,6 +2029,38 @@ ad_timezone(char* buffer, size_t length)
 		|| zone.ID().IsEmpty())
 		return -1;
 	strlcpy(buffer, zone.ID().String(), length);
+	return 0;
+}
+
+
+/*! The language air/OS is set to, as a BCP 47 tag ("en-AU", "pt-BR",
+	"zh-Hans-CN"): the first of the preferred languages, and where that names
+	no country, the country of the formatting conventions. */
+int
+ad_locale(char* buffer, size_t length)
+{
+	BMessage preferred;
+	const char* id;
+	if (BLocaleRoster::Default()->GetPreferredLanguages(&preferred) != B_OK
+		|| preferred.FindString("language", &id) != B_OK)
+		return -1;
+	BLanguage language(id);
+	const char* code = language.Code();
+	if (code == NULL || code[0] == '\0')
+		return -1;
+	BString tag(code);
+	const char* script = language.ScriptCode();
+	if (script != NULL && script[0] != '\0')
+		tag << "-" << script;
+	BString country(language.CountryCode());
+	if (country.IsEmpty()) {
+		BFormattingConventions conventions;
+		if (BLocale::Default()->GetFormattingConventions(&conventions) == B_OK)
+			country = conventions.CountryCode();
+	}
+	if (!country.IsEmpty())
+		tag << "-" << country;
+	strlcpy(buffer, tag.String(), length);
 	return 0;
 }
 
