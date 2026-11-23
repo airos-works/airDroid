@@ -26,7 +26,12 @@
   bundle follow. Tried on Linux/KVM with de-DE (German names, the `de`
   split of the test bundle, French with `persist.sys.locale=fr-FR`,
   English without) and on the X399 (set to plain `en`: Android has `en`).
-* Clipboard both ways (implemented; not yet verified on air/OS).
+* Clipboard both ways. On the X399 (release 20261123-0210, airdroid
+  0.1.0-169): text put on air/OS's clipboard (`clipboard -c`) is Android's
+  primary clip ("host clipboard") once an Android window is in front, and
+  text copied in an Android text field (Ctrl+A, copy) is on air/OS's
+  clipboard (`clipboard -p`). Android's side read with
+  `service call clipboard 4 s16 com.android.shell i32 0` as the shell user.
 * `airdroid` command: status, shell, logcat, app …, prop, stop.
 
 * GPU rendering, phase 1 (virgl): Android's GL goes through Mesa's virgl
