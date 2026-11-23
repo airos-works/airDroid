@@ -235,6 +235,15 @@ damaged in a way the repair does not recognise. `airdroid shell` and
 a start), not only once Android is up, to see what such a start dies
 of.
 
+A VM left behind (2026-11-23): when the app is killed or crashes, its QEMU
+runs on with the data disk open, and the next airDroid started a second VM
+on the same disk. Starting a VM now first ends the QEMU that `qemu.pid` in
+the state directory names, if that process still is a QEMU (SIGTERM, then
+SIGKILL after 5 s). The data disk then gets the check above. Tried on
+Linux/KVM and on the X399: app killed with Android running, QEMU still
+there; at the next start one QEMU, "errors repaired (e2fsck exit 1)",
+Android up.
+
 ## An Intel machine (iMac, 2026-11-22)
 
 i5-7360U (2 cores, 4 threads), 8 GB, Iris Plus 640 on i915_drm (virgl on
