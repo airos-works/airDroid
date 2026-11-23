@@ -42,6 +42,10 @@ pub mod kind {
     pub const APP_CLICKED: i32 = 17;
     pub const CLIPBOARD: i32 = 18;
     pub const TASK_BOUNDS: i32 = 19;
+    /// the user started moving or resizing a (multi-window) window
+    pub const DRAG_BEGIN: i32 = 20;
+    /// x, y, dx, dy: the frame the window zoomed to
+    pub const ZOOM: i32 = 21;
 }
 
 pub mod action {
@@ -88,6 +92,9 @@ mod ffi {
         pub fn ad_window_frame_end(id: u32);
         pub fn ad_window_present(id: u32, pixels: *const u32, w: i32, h: i32);
         pub fn ad_window_activate(id: u32);
+        pub fn ad_window_zoom(id: u32);
+        pub fn ad_window_minimize(id: u32);
+        pub fn ad_window_set_caption(id: u32, height: f32);
         pub fn ad_window_hide_cursor(id: u32, hidden: i32);
         pub fn ad_main_show();
         pub fn ad_main_set_status(text: *const libc::c_char, progress: f32);
@@ -208,6 +215,18 @@ mod imp {
     }
     pub fn window_activate(id: u32) {
         unsafe { ffi::ad_window_activate(id) }
+    }
+    /// Zooms the window as air/OS zooms windows (or back); a ZOOM event
+    /// says to which frame.
+    pub fn window_zoom(id: u32) {
+        unsafe { ffi::ad_window_zoom(id) }
+    }
+    pub fn window_minimize(id: u32) {
+        unsafe { ffi::ad_window_minimize(id) }
+    }
+    /// Height of Android's caption bar at the window's top (0: none).
+    pub fn window_set_caption(id: u32, height: f32) {
+        unsafe { ffi::ad_window_set_caption(id, height) }
     }
     pub fn window_hide_cursor(id: u32, hidden: bool) {
         unsafe { ffi::ad_window_hide_cursor(id, hidden as i32) }
@@ -358,6 +377,9 @@ mod imp {
     }
     pub fn window_present(id: u32, pixels: &[u32], w: u32, h: u32) {}
     pub fn window_activate(id: u32) {}
+    pub fn window_zoom(id: u32) {}
+    pub fn window_minimize(id: u32) {}
+    pub fn window_set_caption(id: u32, height: f32) {}
     pub fn window_hide_cursor(id: u32, hidden: bool) {}
     pub fn main_show() {}
     pub fn main_set_status(text: &str, progress: f32) {

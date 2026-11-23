@@ -899,6 +899,10 @@ impl State {
             let serial = self.next_serial();
             for p in self.pointers_for(&ns) {
                 p.enter(serial, &ns, lx, ly);
+                // Waydroid's hwcomposer ignores where enter says the
+                // pointer is: Android would act on the old position until
+                // the next motion (a click right after entering went there)
+                p.motion(t, lx, ly);
                 if p.version() >= 5 {
                     p.frame();
                 }
@@ -1647,6 +1651,11 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
                     update = w.announced;
                 }
             }
+            xdg_toplevel::Request::SetMinimized => {
+                if st.windows.get(&wid).is_some_and(|w| w.announced) {
+                    st.link.send(&ToHost::WindowMinimize { id: wid });
+                }
+            }
             xdg_toplevel::Request::SetMaximized | xdg_toplevel::Request::UnsetMaximized => {
                 let max = matches!(req, xdg_toplevel::Request::SetMaximized);
                 if let Some(w) = st.windows.get_mut(&wid) {
@@ -1680,7 +1689,22 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
                     b.release();
                 }
                 if w.announced {
-                    st.link.send(&ToHost::WindowDestroy { id: wid });
+                    // an app's window (multi-window) goes when its task
+                    // ends, or when Android hides the task (minimize):
+                    // the host keeps the latter's window, minimized
+                    match w.app_id.strip_prefix("waydroid.") {
+                        Some(package) if !package.is_empty() => {
+                            let (link, package) = (st.link.clone(), package.to_string());
+                            std::thread::spawn(move || {
+                                if crate::apps::task_hidden(&package) {
+                                    link.send(&ToHost::WindowHidden { id: wid });
+                                } else {
+                                    link.send(&ToHost::WindowDestroy { id: wid });
+                                }
+                            });
+                        }
+                        _ => st.link.send(&ToHost::WindowDestroy { id: wid }),
+                    }
                 }
             }
             if st.keyboard_focus == Some(wid) {

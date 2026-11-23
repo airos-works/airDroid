@@ -177,6 +177,12 @@ fn main() {
                     eprintln!("dev: window {id} closed");
                     host.lock().unwrap().windows.remove(&id);
                 }
+                ToHost::WindowHidden { id } => {
+                    eprintln!("dev: window {id} hidden (minimized)");
+                    host.lock().unwrap().windows.remove(&id);
+                }
+                ToHost::WindowMinimize { id } => eprintln!("dev: window {id} minimize"),
+                ToHost::Density { dpi } => eprintln!("dev: Android density {dpi} dpi"),
                 ToHost::Frame { window, serial, width, height, layers, .. } => {
                     let mut h = host.lock().unwrap();
                     let Host { buffers, windows } = &mut *h;
@@ -314,7 +320,8 @@ fn command(line: &str, host: &Arc<Mutex<Host>>, s: &Session) {
         Some("tap") => {
             let (x, y) = (num(2), num(3));
             let _ = s.send(&ToGuest::Touch { window: win, id: 0, kind: TouchKind::Down, x, y });
-            std::thread::sleep(Duration::from_millis(60));
+            // "tap WIN X Y MS": how long the finger stays down (60 ms)
+            std::thread::sleep(Duration::from_millis(parts.get(4).and_then(|v| v.parse().ok()).unwrap_or(60)));
             s.send(&ToGuest::Touch { window: win, id: 0, kind: TouchKind::Up, x, y })
         }
         Some("swipe") => {

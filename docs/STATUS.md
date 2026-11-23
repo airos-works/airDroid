@@ -69,9 +69,33 @@
   delivered three buffers and went quiet. airDroid starts it again when
   nothing has come for a quarter of a second, and sends silence if that
   does not help for three.
-* Multi-window resizing: the edges of an app's (borderless) window resize
-  it on the desktop, and Android gives the app's task the new bounds
-  (`am task resize`); moving works through Android's own caption bar.
+* Multi-window moving and resizing (airos-works/airDroid#1, #2): the edges
+  of an app's (borderless) window resize it on the desktop, and dragging
+  Android's caption bar (42 dp) moves it right there, under the mouse,
+  like any air/OS window; Android gives the app's task the new bounds when
+  the button goes up (`am task resize`). It used to be Android that moved
+  the task, and the window followed its frames: a round trip per step, and
+  at fractional scales (where app_server redraws a moved window instead of
+  copying it) it lagged and jumped. The engine leaves such a window where
+  the user put it until Android's task is there too. A press on the caption
+  that does not move is a click for Android, given when the button goes up.
+  Caption buttons: minimize (Waydroid's hwcomposer asks with
+  xdg_toplevel.set_minimized) minimizes the window; maximize (Android makes
+  the task fullscreen, over the whole screen) zooms the window as air/OS
+  zooms windows instead, on the display it is on as the Screen preferences
+  say and beside the Deskbar: F11 turns the task back to freeform, and it
+  gets that frame (Android keeps a task's top below its status bar's place,
+  32 px at 180 dpi; the guest then keeps the bottom where it was asked);
+  maximize again goes back. Close and back reach into the corners Android
+  keeps for resizing (SystemUI's freeform_resize_corner: 22 dp squares
+  inside the task, where clicks and touches go nowhere), so clicks there
+  move sideways out of the corner onto the same button. A task Android
+  hides (its own minimize fallback) leaves its window minimized; restoring
+  it starts the app again. Android's windows take the first click (their
+  caption is their title bar), and the pointer's position reaches Android
+  when it enters a window (Waydroid's hwcomposer ignores enter's
+  coordinates, so a click right after entering went to the old position).
+  Verified on the X399 at 100 % and 175 % with real pointer input (VNC).
 * Notifications: Android's notifications show on the air/OS desktop
   (BNotification with the app's name and icon; clicking one starts the
   app). airDroid serves Waydroid's `waydroidnotifications` binder service

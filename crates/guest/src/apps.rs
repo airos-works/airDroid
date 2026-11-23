@@ -427,26 +427,143 @@ pub fn watch_packages(link: HostLink) {
     });
 }
 
-/// Multi-window: gives `package`'s visible freeform task the bounds
-/// (left, top, width, height), as the desktop window was resized.
+/// A task as `am stack list` shows it.
+#[derive(Debug, Clone, PartialEq)]
+struct Task {
+    id: String,
+    package: String,
+    visible: bool,
+    /// its root task's windowing mode is freeform
+    freeform: bool,
+    /// left, top, right, bottom
+    bounds: Option<(i32, i32, i32, i32)>,
+}
+
+/// Parses `am stack list`: "RootTask id=.. bounds=..", its
+/// "configuration={.. mWindowingMode=freeform ..}" line, then its tasks
+/// ("  taskId=23: com.android.settings/... bounds=[..] userId=0 visible=true ...").
+fn parse_tasks(list: &str) -> Vec<Task> {
+    let mut tasks = Vec::new();
+    let mut freeform = false;
+    for l in list.lines().map(str::trim) {
+        if l.starts_with("RootTask ") {
+            freeform = false;
+        } else if l.starts_with("configuration=") {
+            freeform = l.contains("mWindowingMode=freeform");
+        } else if let Some(rest) = l.strip_prefix("taskId=") {
+            let Some((id, rest)) = rest.split_once(": ") else { continue };
+            let package = rest.split(['/', ' ']).next().unwrap_or("").to_string();
+            let bounds = rest.split_once(" bounds=[").and_then(|(_, b)| {
+                let (lt, rest) = b.split_once("][")?;
+                let (rb, _) = rest.split_once(']')?;
+                let (l, t) = lt.split_once(',')?;
+                let (r, b) = rb.split_once(',')?;
+                Some((l.parse().ok()?, t.parse().ok()?, r.parse().ok()?, b.parse().ok()?))
+            });
+            tasks.push(Task { id: id.to_string(), package, visible: rest.contains("visible=true"), freeform, bounds });
+        }
+    }
+    tasks
+}
+
+fn tasks() -> Result<Vec<Task>, String> {
+    shell_user(&["am", "stack", "list"]).map(|l| parse_tasks(&l))
+}
+
+/// Android's display density in dots per inch (an override set with
+/// `wm density` wins).
+pub fn density() -> u32 {
+    let wm = shell_user(&["/system/bin/wm", "density"]).unwrap_or_default();
+    // "Physical density: 180" and maybe "Override density: 240"
+    let value = |key: &str| wm.lines().find_map(|l| l.trim().strip_prefix(key)?.trim().parse::<u32>().ok());
+    value("Override density:")
+        .or_else(|| value("Physical density:"))
+        .or_else(|| exec::getprop("ro.sf.lcd_density").parse().ok())
+        .filter(|&d| d > 0)
+        .unwrap_or(160)
+}
+
+/// Whether `package` still has a task that Android hides (its window went
+/// away because the caption's minimize button moved it out of sight),
+/// rather than none (the app was closed, or finished).
+pub fn task_hidden(package: &str) -> bool {
+    match tasks() {
+        Ok(t) => {
+            let mine: Vec<&Task> = t.iter().filter(|t| t.package == package).collect();
+            !mine.is_empty() && mine.iter().all(|t| !t.visible)
+        }
+        Err(e) => {
+            logf!("tasks of {package}: {e}");
+            false
+        }
+    }
+}
+
+/// Multi-window: gives `package`'s visible task the bounds (left, top,
+/// width, height), as the desktop window was moved, resized or maximized.
+/// A task Android has just made fullscreen (its caption's maximize button;
+/// the host sent F11, which turns it back into a freeform one) can only
+/// get bounds once it is freeform again, so this waits for that a little.
 pub fn resize_task(package: String, x: i32, y: i32, w: u32, h: u32) {
     std::thread::spawn(move || {
-        let list = match shell_user(&["am", "stack", "list"]) {
-            Ok(l) => l,
-            Err(e) => return logf!("resize {package}: {e}"),
-        };
-        // "  taskId=23: com.android.settings/... bounds=[..] userId=0 visible=true ..."
-        let task = list.lines().map(str::trim).find_map(|l| {
-            let rest = l.strip_prefix("taskId=")?;
-            let (id, rest) = rest.split_once(": ")?;
-            (rest.starts_with(&format!("{package}/")) && rest.contains("visible=true")).then(|| id.to_string())
-        });
-        let Some(task) = task else {
-            return logf!("resize {package}: no visible task");
-        };
         let (r, b) = ((x + w as i32).to_string(), (y + h as i32).to_string());
-        if let Err(e) = shell_user(&["am", "task", "resize", &task, &x.to_string(), &y.to_string(), &r, &b]) {
-            logf!("resize {package}: {e}");
+        for attempt in 0..15 {
+            let list = match tasks() {
+                Ok(l) => l,
+                Err(e) => return logf!("resize {package}: {e}"),
+            };
+            let Some(task) = list.iter().find(|t| t.package == package && t.visible) else {
+                return logf!("resize {package}: no visible task");
+            };
+            if !task.freeform {
+                if attempt == 14 {
+                    return logf!("resize {package}: task {} is not freeform", task.id);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            logf!("resize {package}: task {} {:?} -> {x},{y} {w}x{h}", task.id, task.bounds);
+            if let Err(e) = shell_user(&["am", "task", "resize", &task.id, &x.to_string(), &y.to_string(), &r, &b]) {
+                return logf!("resize {package}: {e}");
+            }
+            // Android keeps a task's top below its status bar's place, and
+            // moves a task that would reach above it down, bottom and all
+            // (a zoomed window would hang off the screen): then the same
+            // bottom again, from the top Android allows
+            let id = task.id.clone();
+            let Ok(now) = tasks() else { return };
+            if let Some((_, top, _, bottom)) = now.iter().find(|t| t.id == id).and_then(|t| t.bounds) {
+                let want = y + h as i32;
+                if top > y && bottom > want && top < want {
+                    if let Err(e) = shell_user(&["am", "task", "resize", &id, &x.to_string(), &top.to_string(), &r, &b]) {
+                        logf!("resize {package}: {e}");
+                    }
+                }
+            }
+            return;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stack_list() {
+        let list = "RootTask id=46 bounds=[100,50][1000,650] displayId=0 userId=0
+ configuration={1.0 ?mcc?mnc [en_US] winConfig={ mBounds=Rect(100, 50 - 1000, 650) mWindowingMode=freeform mDisplayWindowingMode=freeform} as.2 s.30}
+  taskId=46: com.android.settings/com.android.settings.Settings bounds=[100,50][1000,650] userId=0 visible=true topActivity=ComponentInfo{com.android.settings/com.android.settings.Settings}
+
+RootTask id=1 bounds=[0,0][1600,900] displayId=0 userId=0
+ configuration={1.0 winConfig={ mWindowingMode=fullscreen mDisplayWindowingMode=freeform mActivityType=home}}
+  taskId=45: com.android.launcher3/com.android.launcher3.uioverrides.QuickstepLauncher bounds=[0,0][1600,900] userId=0 visible=true topActivity=ComponentInfo{x/y}
+  taskId=4: unknown bounds=[0,0][1600,900] userId=0 visible=false
+";
+        let t = parse_tasks(list);
+        assert_eq!(t.len(), 3);
+        assert_eq!(t[0], Task { id: "46".into(), package: "com.android.settings".into(), visible: true, freeform: true, bounds: Some((100, 50, 1000, 650)) });
+        assert_eq!(t[1], Task { id: "45".into(), package: "com.android.launcher3".into(), visible: true, freeform: false, bounds: Some((0, 0, 1600, 900)) });
+        assert_eq!((t[2].package.as_str(), t[2].visible), ("unknown", false));
+    }
 }
