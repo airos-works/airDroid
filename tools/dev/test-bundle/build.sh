@@ -57,23 +57,39 @@ rm -f "$OUT/split-test.apks"
 "$JAVA" -jar "$TOOLS/bundletool.jar" build-apks --bundle="$W/app.aab" --output="$OUT/split-test.apks" \
 	--aapt2="$TOOLS/aapt2" --ks="$OUT/test.keystore" --ks-pass=pass:android --ks-key-alias=test --key-pass=pass:android
 
-# the same APKs under the other two stores' names
-mkdir -p "$W/apks" "$W/apkm" "$W/xapk/Android/obb/works.airos.splittest"
+# the same APKs as the two stores pack them, in the order of their files
+# (Tracker tells the formats by what a file starts with)
+mkdir -p "$W/apks" "$W/apkm/META-INF" "$W/xapk/Android/obb/works.airos.splittest"
 unzip -q "$OUT/split-test.apks" -d "$W/apks"
+apkm=(META-INF/MANIFEST.MF META-INF/APKMIRRO.SF META-INF/APKMIRRO.RSA info.json icon.png base.apk)
+xapk=(works.airos.splittest.apk icon.png)
 for apk in "$W"/apks/splits/base-*.apk; do
 	q=$(basename "$apk" .apk); q=${q#base-}
 	if [ "$q" = master ]; then
 		cp "$apk" "$W/apkm/base.apk"
 		cp "$apk" "$W/xapk/works.airos.splittest.apk"
 	else
-		cp "$apk" "$W/apkm/split_config.$q.apk"
-		cp "$apk" "$W/xapk/config.$q.apk"
+		cp "$apk" "$W/apkm/split_config.$q.apk"; apkm+=("split_config.$q.apk")
+		cp "$apk" "$W/xapk/config.$q.apk"; xapk+=("config.$q.apk")
 	fi
 done
-echo '{"apkm_version": 1, "pname": "works.airos.splittest", "versioncode": "1"}' > "$W/apkm/info.json"
+cp "$W/res/drawable-xxhdpi/icon.png" "$W/apkm/icon.png"
+cp "$W/res/drawable-xxhdpi/icon.png" "$W/xapk/icon.png"
+# APKMirror signs its file like a jar: stand-ins of those three entries
+{
+	printf 'Manifest-Version: 1.0\r\n\r\n'
+	for f in "${apkm[@]:3}"; do
+		printf 'Name: %s\r\nSHA-256-Digest: %s\r\n\r\n' "$f" "$(sha256sum "$W/apkm/$f" 2>/dev/null | cut -c1-44)"
+	done
+} > "$W/apkm/META-INF/MANIFEST.MF"
+cp "$W/apkm/META-INF/MANIFEST.MF" "$W/apkm/META-INF/APKMIRRO.SF"
+echo "not a signature" > "$W/apkm/META-INF/APKMIRRO.RSA"
+echo '{"apkm_version": 5, "pname": "works.airos.splittest", "versioncode": "1", "arches": ["arm64-v8a", "x86", "x86_64"]}' > "$W/apkm/info.json"
+printf '[InternetShortcut]\r\nURL=https://example.org/\r\n' > "$W/apkm/APKM_installer.url"
 echo '{"xapk_version": 2, "package_name": "works.airos.splittest", "version_code": "1"}' > "$W/xapk/manifest.json"
 echo "expansion file of the split test" > "$W/xapk/Android/obb/works.airos.splittest/main.1.works.airos.splittest.obb"
 rm -f "$OUT/split-test.apkm" "$OUT/split-test.xapk"
-(cd "$W/apkm" && zip -q -0 -r "$OUT/split-test.apkm" .)
-(cd "$W/xapk" && zip -q -0 -r "$OUT/split-test.xapk" .)
+(cd "$W/apkm" && zip -q -X "$OUT/split-test.apkm" "${apkm[@]}" APKM_installer.url)
+(cd "$W/xapk" && zip -q -X "$OUT/split-test.xapk" "${xapk[@]}" \
+	Android/obb/works.airos.splittest/main.1.works.airos.splittest.obb manifest.json)
 ls -la "$OUT"/split-test.*

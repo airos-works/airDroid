@@ -1641,8 +1641,13 @@ ad_register_types(const char* signature)
 		apk.SetPreferredApp(signature);
 
 	// App bundles: an app as its base APK and split APKs in one zip file
-	// (APKMirror's .apkm, APKPure's .xapk, .apks). Zips too: the rule finds
-	// the ones that start with an APK, the extension the others.
+	// (APKMirror's .apkm, APKPure's .xapk, .apks). The registrar goes by a
+	// file's contents before its name, and these are zips (an .apkm, signed
+	// like a jar, even passes for a Java archive at 0.50): the rule knows
+	// what each format starts with. An .apkm has its signature's entries
+	// first, the second after the manifest (some kB with many splits); an
+	// .xapk starts with "<package>.apk"; .apks is bundletool's (toc.pb) or
+	// SAI's (meta.sai_v2.json).
 	BMimeType bundle("application/x-vnd.android.app-bundle");
 	if (!bundle.IsInstalled())
 		bundle.Install();
@@ -1655,7 +1660,9 @@ ad_register_types(const char* signature)
 	bundleExtensions.AddString("extensions", "xapk");
 	bundleExtensions.AddString("extensions", "apks");
 	bundle.SetFileExtensions(&bundleExtensions);
-	bundle.SetSnifferRule("0.55 [0] (\"PK\\003\\004\") [30:60] (\".apk\")");
+	bundle.SetSnifferRule("0.55 [0] (\"PK\\003\\004\") ([60:8192] \"META-INF/APKMIRRO\""
+		" | [30:130] \".apk\" | [30] \"split_config.\" | [30] \"toc.pb\""
+		" | [30] \"splits/base-\" | [30] \"meta.sai_v\" | [30] \"Android/obb/\")");
 	if (bundle.GetPreferredApp(preferred) != B_OK || preferred[0] == '\0')
 		bundle.SetPreferredApp(signature);
 }

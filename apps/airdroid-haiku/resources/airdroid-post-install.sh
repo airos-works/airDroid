@@ -24,4 +24,9 @@ if ! setmime -dump "$bundle" 2>/dev/null | grep -q -- -extension; then
 fi
 setmime -dump "$bundle" 2>/dev/null | grep -q -- -preferredAppSig \
 	|| setmime -set "$bundle" -preferredAppSig "$signature"
+# A file's contents count before its name, and both are zips: without these
+# rules (the app sets them at every start too) they are zip archives to
+# Tracker until airDroid has run once.
+setmime -set "$type" -sniffRule '0.60 [0] ("PK\003\004") [30] ("AndroidManifest.xml" | "META-INF/com/android/build/" | "classes.dex" | "resources.arsc")'
+setmime -set "$bundle" -sniffRule '0.55 [0] ("PK\003\004") ([60:8192] "META-INF/APKMIRRO" | [30:130] ".apk" | [30] "split_config." | [30] "toc.pb" | [30] "splits/base-" | [30] "meta.sai_v" | [30] "Android/obb/")'
 exit 0

@@ -25,5 +25,6 @@ resource vector_icon {
 
 resource file_types message {
 	"types" = "application/vnd.android.package-archive",
-	"types" = "application/x-vnd.android.app-bundle"
+	"types" = "application/x-vnd.android.app-bundle",
+	"types" = "application/zip"
 };

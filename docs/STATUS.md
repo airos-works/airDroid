@@ -161,10 +161,16 @@ are left out.
 
 Tracker knows the bundles as "Android app bundle"
 (`application/x-vnd.android.app-bundle`, airDroid preferred). The registrar
-goes by a file's contents before its name, and a bundle is a zip: the type's
-rule recognizes the ones that start with an entry these formats start with;
-any other is typed as a zip archive and opens with Open with › airDroid, the
-app's Install App… or `airdroid app install`.
+goes by a file's contents before its name, and a bundle is a zip (an
+`.apkm`, signed like a jar, was a "Java archive"): the type's rule knows
+what each format starts with (`META-INF/APKMIRRO.SF` within the first 8 kB,
+`<package>.apk`, `toc.pb`, SAI's `meta.sai_v2.json`, `Android/obb/`). A
+bundle packed otherwise is a zip archive to Tracker and opens with Open
+with › airDroid (airDroid takes zip files for that), the app's Install App…
+or `airdroid app install`; all of them go by the contents, not the name.
+The post-install script had filled in neither type's description and
+extensions: `mimeset` on the app makes the types it supports, empty, and the
+script asked whether the type existed.
 
 Tests: the choice of splits, the zip reader and the name checks have unit
 tests (`cargo test -p airdroid-guest bundle`). `tools/dev/test-bundle/build.sh`
