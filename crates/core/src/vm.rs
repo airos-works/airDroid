@@ -205,6 +205,7 @@ impl VmConfig {
 
     /// Starts QEMU. The caller connects to `socket()` afterwards.
     pub fn spawn(&self) -> std::io::Result<Child> {
+        self.end_leftover();
         std::fs::create_dir_all(&self.state_dir)?;
         let _ = std::fs::remove_file(self.socket());
         let _ = std::fs::remove_file(self.console_log());
@@ -254,6 +255,53 @@ impl VmConfig {
         let _ = std::fs::write(self.state_dir.join("qemu.pid"), format!("{}\n", child.id()));
         Ok(child)
     }
+}
+
+impl VmConfig {
+    /// Ends the QEMU an earlier airDroid left behind: the app was killed or
+    /// crashed, and its VM runs on, with Android's data disk open. A second
+    /// VM on that disk would destroy what is on it.
+    fn end_leftover(&self) {
+        let path = self.state_dir.join("qemu.pid");
+        let Some(pid) = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<i32>().ok()) else {
+            return;
+        };
+        if pid > 1 && is_qemu(pid) {
+            eprintln!("airDroid: ending the VM an earlier airDroid left running (process {pid})");
+            let gone = |signal: i32, tenths: u32| {
+                unsafe { libc::kill(pid, signal) };
+                for _ in 0..tenths {
+                    if !is_qemu(pid) {
+                        return true;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                !is_qemu(pid)
+            };
+            if !gone(libc::SIGTERM, 50) && !gone(libc::SIGKILL, 30) {
+                eprintln!("airDroid: process {pid} does not end");
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Whether process `pid` is a QEMU (the number alone may be another
+/// program's by now).
+#[cfg(target_os = "haiku")]
+fn is_qemu(pid: i32) -> bool {
+    let mut info: libc::team_info = unsafe { std::mem::zeroed() };
+    if unsafe { libc::get_team_info(pid, &mut info) } != 0 {
+        return false;
+    }
+    let args: Vec<u8> = info.args.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+    String::from_utf8_lossy(&args).contains("qemu-system")
+}
+
+#[cfg(not(target_os = "haiku"))]
+fn is_qemu(pid: i32) -> bool {
+    // (a zombie has no command line: it holds nothing open)
+    std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| String::from_utf8_lossy(&c).contains("qemu-system"))
 }
 
 /// QEMU and the render server (which inherit our limit) need more file
