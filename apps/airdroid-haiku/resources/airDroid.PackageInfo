@@ -34,3 +34,6 @@ requires {
 	cmd:curl
 	cmd:unzip
 }
+post-install-scripts {
+	"boot/post-install/airdroid.sh"
+}
