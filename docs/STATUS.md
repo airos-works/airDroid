@@ -199,6 +199,11 @@ for airos-works/haiku#148), airDroid main as of this day:
   device local when the GPU has no others (all of ANV's are; Android
   was left without any memory it could map).
 * The microphone: see Microphone above.
+* All of it from shipped packages: on release 20261122-2357 (i915_drm
+  with user pointer buffers, the mixer of airos-works/haiku#151,
+  airDroid 0.1.0-157) Vulkan mode runs the Godot editor on ANV and a
+  20 s recording of the internal microphone comes through without the
+  input having to be started again.
 
 Before that fix (hrev60207+2823) the same machine stopped dead within a
 minute of each of two starts, with nothing on screen and no ping: the
