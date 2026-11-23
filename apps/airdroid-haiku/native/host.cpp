@@ -663,7 +663,7 @@ public:
 	{
 		BMenuBar* bar = new BMenuBar("menu");
 		BMenu* file = new BMenu("File");
-		file->AddItem(new BMenuItem("Install APK" B_UTF8_ELLIPSIS,
+		file->AddItem(new BMenuItem("Install App" B_UTF8_ELLIPSIS,
 			_Action(AD_ACT_INSTALL_APK), 'O'));
 		file->AddSeparatorItem();
 		file->AddItem(new BMenuItem("Quit", new BMessage(B_QUIT_REQUESTED), 'Q'));
@@ -698,7 +698,7 @@ public:
 		BScrollView* scroll = new BScrollView("scroll", fApps, 0, false, true);
 		fShowButton = new BButton("show", "Show Android",
 			_Action(AD_ACT_SHOW_FULL_UI));
-		BButton* install = new BButton("install", "Install APK" B_UTF8_ELLIPSIS,
+		BButton* install = new BButton("install", "Install App" B_UTF8_ELLIPSIS,
 			_Action(AD_ACT_INSTALL_APK));
 
 		BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
@@ -1075,7 +1075,7 @@ public:
 	{
 		if (fPanel == NULL) {
 			fPanel = new BFilePanel(B_OPEN_PANEL, NULL, NULL, B_FILE_NODE, true);
-			fPanel->Window()->SetTitle("airDroid: Install APK");
+			fPanel->Window()->SetTitle("airDroid: Install an App (APK or bundle)");
 		}
 		fPanel->Show();
 	}
@@ -1612,14 +1612,18 @@ ad_make_launcher(const char* path, const char* appPath, const char* package,
 }
 
 
-/*! Makes sure Tracker knows Android packages (.apk) and offers airDroid
-	for them (the post-install script does the same at installation). */
+/*! Makes sure Tracker knows Android packages (.apk) and app bundles (.apkm,
+	.xapk, .apks) and offers airDroid for them (the post-install script does the same at installation). */
 void
 ad_register_types(const char* signature)
 {
 	BMimeType apk("application/vnd.android.package-archive");
-	if (!apk.IsInstalled()) {
+	// (a type may be there with nothing in it: mimeset makes the types an
+	// app says it supports)
+	char description[B_MIME_TYPE_LENGTH];
+	if (!apk.IsInstalled())
 		apk.Install();
+	if (apk.GetShortDescription(description) != B_OK || description[0] == '\0') {
 		apk.SetShortDescription("Android app");
 		apk.SetLongDescription("Android application package");
 	}
@@ -1635,6 +1639,32 @@ ad_register_types(const char* signature)
 	char preferred[B_MIME_TYPE_LENGTH];
 	if (apk.GetPreferredApp(preferred) != B_OK || preferred[0] == '\0')
 		apk.SetPreferredApp(signature);
+
+	// App bundles: an app as its base APK and split APKs in one zip file
+	// (APKMirror's .apkm, APKPure's .xapk, .apks). The registrar goes by a
+	// file's contents before its name, and these are zips (an .apkm, signed
+	// like a jar, even passes for a Java archive at 0.50): the rule knows
+	// what each format starts with. An .apkm has its signature's entries
+	// first, the second after the manifest (some kB with many splits); an
+	// .xapk starts with "<package>.apk"; .apks is bundletool's (toc.pb) or
+	// SAI's (meta.sai_v2.json).
+	BMimeType bundle("application/x-vnd.android.app-bundle");
+	if (!bundle.IsInstalled())
+		bundle.Install();
+	if (bundle.GetShortDescription(description) != B_OK || description[0] == '\0') {
+		bundle.SetShortDescription("Android app bundle");
+		bundle.SetLongDescription("Android app with its split packages");
+	}
+	BMessage bundleExtensions;
+	bundleExtensions.AddString("extensions", "apkm");
+	bundleExtensions.AddString("extensions", "xapk");
+	bundleExtensions.AddString("extensions", "apks");
+	bundle.SetFileExtensions(&bundleExtensions);
+	bundle.SetSnifferRule("0.55 [0] (\"PK\\003\\004\") ([60:8192] \"META-INF/APKMIRRO\""
+		" | [30:130] \".apk\" | [30] \"split_config.\" | [30] \"toc.pb\""
+		" | [30] \"splits/base-\" | [30] \"meta.sai_v\" | [30] \"Android/obb/\")");
+	if (bundle.GetPreferredApp(preferred) != B_OK || preferred[0] == '\0')
+		bundle.SetPreferredApp(signature);
 }
 
 

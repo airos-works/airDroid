@@ -126,11 +126,12 @@ pub fn android_output(argv: &[&str]) -> io::Result<String> {
 pub fn android_output_as(argv: &[&str], uid: Option<u32>) -> io::Result<String> {
     let (code, out, err) = run_as(argv, true, uid, &[])?;
     if code != 0 {
-        return Err(io::Error::other(format!(
-            "{} exited {code}: {}",
-            argv.join(" "),
-            String::from_utf8_lossy(&err).trim()
-        )));
+        // Android's commands often say what went wrong on their standard
+        // output ("Failure [INSTALL_FAILED_MISSING_SPLIT: ...]")
+        let err = String::from_utf8_lossy(&err);
+        let out = String::from_utf8_lossy(&out);
+        let said = if err.trim().is_empty() { out.trim() } else { err.trim() };
+        return Err(io::Error::other(format!("{} exited {code}: {said}", argv.join(" "))));
     }
     Ok(String::from_utf8_lossy(&out).trim().to_string())
 }
