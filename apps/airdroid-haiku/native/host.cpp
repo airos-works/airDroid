@@ -729,6 +729,21 @@ public:
 	virtual void MessageReceived(BMessage* message)
 	{
 		switch (message->what) {
+			case B_SIMPLE_DATA:
+			{
+				// files dropped on the window (from Tracker): the same as
+				// opening them with airDroid
+				if (!message->HasRef("refs")) {
+					BWindow::MessageReceived(message);
+					break;
+				}
+				BMessage refs(B_REFS_RECEIVED);
+				entry_ref ref;
+				for (int32 n = 0; message->FindRef("refs", n, &ref) == B_OK; n++)
+					refs.AddRef("refs", &ref);
+				be_app->PostMessage(&refs);
+				break;
+			}
 			case kMsgAction:
 			{
 				AdEvent event = MakeEvent(AD_ACTION, 0);
