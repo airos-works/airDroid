@@ -245,6 +245,30 @@ Not done: an `.apkm` in APKMirror's old encrypted format (the site has not
 made those for years; the message says to download it again), and bundles
 inside bundles.
 
+## Windows that never came (airos-works/airDroid#3; 2026-11-23)
+
+About once in twenty app starts in multi-window mode the app had a
+visible task and no window, and no app got one any more until airDroid was
+restarted: SurfaceFlinger was blocked in the composer. Waydroid's
+hwcomposer reads its Wayland connection on two threads over one event
+queue. One only dispatches events (`hwc_wayland_thread`:
+`wl_display_dispatch()`); the composer's own thread makes a window and
+waits for its first configure with `wl_display_roundtrip()`
+(`window::create`). When the first thread is the one that handles the
+configure and the roundtrip's answer, the second goes to sleep in `poll()`
+for an event that has already been handled, and stays there until the next
+event of any kind. On a desktop compositor one soon comes (pointer motion,
+a frame); here, with nothing of Android on screen, none did. The stack
+(`debuggerd -b` of the composer service): `hwc_set` → `multi_window_mode::
+get_window` → `open_windows::add` → `window::create` →
+`wl_display_roundtrip_queue` → `poll`. Proof on the X399 with the hang
+there: one unrelated event (a clipboard change on air/OS, which reaches
+the composer's data device) and the window appeared.
+
+The guest's compositor now pings its clients (`xdg_wm_base.ping`): every
+second, and at every tick of its loop (100 ms at most) for two seconds
+after a window was made or configured. That is the next event.
+
 ## Android's data after a crash
 
 The guest checks the data disk (ext4) with e2fsck before it mounts it,

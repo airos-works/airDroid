@@ -328,6 +328,11 @@ pub struct State {
     next_buffer: u32,
     next_window: u32,
     serial: u32,
+    /// the clients' xdg_wm_base objects and when they were last pinged
+    /// (see keepalive())
+    wm_bases: Vec<xdg_wm_base::XdgWmBase>,
+    last_ping_ns: u64,
+    ping_often_until_ns: u64,
     /// pointer: (window, surface under it)
     pointer_focus: Option<(u32, ObjectId)>,
     keyboard_focus: Option<u32>,
@@ -340,6 +345,37 @@ pub struct State {
 }
 
 impl State {
+    /// Pings the clients: every second, and every tick of the loop for two
+    /// seconds after a window was made or configured.
+    ///
+    /// Waydroid's hwcomposer reads its connection on two threads over one
+    /// event queue: a thread that only dispatches events, and the composer's
+    /// own thread, which waits for a new window's first configure with
+    /// wl_display_roundtrip(). When the first thread is the one that gets
+    /// the configure and the roundtrip's answer, the second can go to sleep
+    /// waiting for an event that has already been handled, and it sleeps
+    /// until the next event of any kind. With nothing on screen there is
+    /// none: SurfaceFlinger stays blocked in the composer, and no app gets
+    /// a window until airDroid is restarted (seen about once in twenty
+    /// windows). A ping is that next event.
+    fn keepalive(&mut self) {
+        let now = sys::monotonic_ns();
+        let every = if now < self.ping_often_until_ns { 50_000_000 } else { 1_000_000_000 };
+        if now.saturating_sub(self.last_ping_ns) < every {
+            return;
+        }
+        self.last_ping_ns = now;
+        self.wm_bases.retain(|w| w.is_alive());
+        let serial = self.next_serial();
+        for w in &self.wm_bases {
+            w.ping(serial);
+        }
+    }
+
+    fn ping_often(&mut self) {
+        self.ping_often_until_ns = sys::monotonic_ns() + 2_000_000_000;
+    }
+
     fn next_serial(&mut self) -> u32 {
         self.serial = self.serial.wrapping_add(1);
         self.serial
@@ -527,6 +563,7 @@ impl State {
         }
         win.toplevel.configure(w, h, states);
         win.xdg_surface.configure(serial);
+        self.ping_often();
     }
 
     fn surface_size(&self, s: &Surface) -> Option<(i32, i32)> {
@@ -1184,8 +1221,9 @@ global_simple!(wp_viewporter::WpViewporter);
 global_simple!(wl_data_device_manager::WlDataDeviceManager);
 
 impl GlobalDispatch<xdg_wm_base::XdgWmBase, ()> for State {
-    fn bind(_: &mut State, _: &DisplayHandle, _: &Client, r: New<xdg_wm_base::XdgWmBase>, _: &(), di: &mut DataInit<'_, State>) {
-        di.init(r, ());
+    fn bind(st: &mut State, _: &DisplayHandle, _: &Client, r: New<xdg_wm_base::XdgWmBase>, _: &(), di: &mut DataInit<'_, State>) {
+        let wm = di.init(r, ());
+        st.wm_bases.push(wm);
     }
 }
 
@@ -1588,6 +1626,7 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for State {
         match req {
             xdg_surface::Request::GetToplevel { id } => {
                 let tl = di.init(id, ());
+                st.ping_often();
                 let Some(sid) = st.xdg_surfaces.get(&x.id()).cloned() else { return };
                 st.next_window += 1;
                 let wid = st.next_window;
@@ -2062,6 +2101,9 @@ pub fn run(link: HostLink, inbox: Arc<Inbox>, socket: &str, out: OutputCfg) -> s
         next_buffer: 0,
         next_window: 0,
         serial: 0,
+        wm_bases: Vec::new(),
+        last_ping_ns: 0,
+        ping_often_until_ns: 0,
         pointer_focus: None,
         keyboard_focus: None,
         touch_focus: HashMap::new(),
@@ -2128,6 +2170,7 @@ pub fn run(link: HostLink, inbox: Arc<Inbox>, socket: &str, out: OutputCfg) -> s
         st.expire_buffers();
         let t1 = sys::monotonic_ns();
         st.flush_frames();
+        st.keepalive();
         let t2 = sys::monotonic_ns();
         let _ = display.flush_clients();
         let t3 = sys::monotonic_ns();
