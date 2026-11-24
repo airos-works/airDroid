@@ -13,7 +13,11 @@
   opened in Tracker, dropped on airDroid's window, the file panel,
   `airdroid app install`; see "App bundles"),
   launch, list with names and icons, Deskbar launchers (Applications ›
-  Android apps), remove.
+  Android apps), remove. Icons are Waydroid's PNGs (72 dp at Android's
+  density, 81 px at 180 dpi), kept as the launchers' vector icon and the
+  list's: air/OS (haiku a16c3f678e and later) draws them from the PNG at
+  every size and display scale; older systems show the launchers' 32/16 px
+  B_CMAP8 icons.
 * Audio output (PulseAudio protocol in the guest, Media Kit on air/OS).
 * Networking (QEMU user networking; Android sees Ethernet).
 * Time zone: Android follows air/OS's (BTimeZone, `airdroid.tz=` on the

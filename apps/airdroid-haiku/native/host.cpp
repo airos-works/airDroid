@@ -15,6 +15,7 @@
 #include <Button.h>
 #include <CheckBox.h>
 #include <Clipboard.h>
+#include <ControlLook.h>
 #include <Cursor.h>
 #include <algorithm>
 #include <DataIO.h>
@@ -25,6 +26,7 @@
 #include <FindDirectory.h>
 #include <GroupLayout.h>
 #include <GroupLayoutBuilder.h>
+#include <IconUtils.h>
 #include <LayoutBuilder.h>
 #include <ListView.h>
 #include <FormattingConventions.h>
@@ -725,10 +727,16 @@ public:
 
 	const std::string& Package() const { return fEntry.package; }
 
+	/*! The icon's size in the list: B_LARGE_ICON, larger with the font. */
+	static float IconSize()
+	{
+		return be_control_look->ComposeIconSize(B_LARGE_ICON).Width() + 1;
+	}
+
 	virtual void Update(BView* owner, const BFont* font)
 	{
 		BListItem::Update(owner, font);
-		SetHeight(std::max(Height(), 40.0f));
+		SetHeight(std::max(Height(), IconSize() + 8));
 	}
 
 	virtual void DrawItem(BView* owner, BRect frame, bool complete)
@@ -738,11 +746,14 @@ public:
 			: ui_color(B_LIST_BACKGROUND_COLOR);
 		owner->SetHighColor(background);
 		owner->FillRect(frame);
+		float iconSize = IconSize();
 		if (fEntry.icon != NULL) {
+			float top = floorf(frame.top + (frame.Height() + 1 - iconSize) / 2);
 			owner->SetDrawingMode(B_OP_ALPHA);
+			owner->SetBlendingMode(B_PIXEL_ALPHA, B_ALPHA_OVERLAY);
 			owner->DrawBitmap(fEntry.icon, fEntry.icon->Bounds(),
-				BRect(frame.left + 4, frame.top + 4, frame.left + 35,
-					frame.top + 35), B_FILTER_BITMAP_BILINEAR);
+				BRect(frame.left + 4, top, frame.left + 4 + iconSize - 1,
+					top + iconSize - 1), B_FILTER_BITMAP_BILINEAR);
 			owner->SetDrawingMode(B_OP_COPY);
 		}
 		owner->SetHighColor(IsSelected()
@@ -751,7 +762,8 @@ public:
 		font_height fh;
 		owner->GetFontHeight(&fh);
 		float baseline = frame.top + (frame.Height() + fh.ascent - fh.descent) / 2;
-		owner->DrawString(fEntry.name.c_str(), BPoint(frame.left + 44, baseline));
+		owner->DrawString(fEntry.name.c_str(),
+			BPoint(frame.left + iconSize + 12, baseline));
 		owner->SetHighColor(tint_color(owner->HighColor(), B_LIGHTEN_1_TINT));
 	}
 
@@ -1245,6 +1257,24 @@ DecodeImage(const uint8* data, size_t length)
 }
 
 
+/*! An app's icon from its PNG, \a size pixels square. Where the system
+	takes PNGs as vector icons (air/OS), the bitmap keeps the PNG and the
+	app_server draws it from that at the screen's density; elsewhere it is
+	the PNG at its own size, scaled when drawn. */
+static BBitmap*
+IconFromPNG(const uint8* data, size_t length, int32 size)
+{
+	if (data == NULL || length == 0)
+		return NULL;
+	BBitmap* icon = new BBitmap(BRect(0, 0, size - 1, size - 1), B_RGBA32);
+	if (icon->InitCheck() == B_OK
+		&& BIconUtils::GetVectorIcon(data, length, icon) == B_OK)
+		return icon;
+	delete icon;
+	return DecodeImage(data, length);
+}
+
+
 /*! Scales a bitmap to size x size B_RGBA32 (box filter). */
 static BBitmap*
 ScaleIcon(BBitmap* source, int32 size)
@@ -1279,7 +1309,8 @@ ScaleIcon(BBitmap* source, int32 size)
 
 
 /*! Writes a Tracker icon (large + mini, B_CMAP8 from the RGBA image) to a
-	node, for Deskbar launchers. */
+	node, for Deskbar launchers. These are what systems use that do not take
+	a PNG as the vector icon (see ad_make_launcher()). */
 static void
 SetNodeIcon(BNode& node, BBitmap* rgba)
 {
@@ -1693,7 +1724,8 @@ ad_main_set_apps(int32 count, const char* const* packages,
 		AppEntry e;
 		e.package = packages[i];
 		e.name = names[i];
-		e.icon = DecodeImage(icons[i], iconLengths[i]);
+		e.icon = IconFromPNG(icons[i], iconLengths[i],
+			(int32)AppItem::IconSize());
 		apps.push_back(e);
 	}
 	if (sMain == NULL || !sMain->Lock()) {
@@ -1763,7 +1795,15 @@ ad_make_launcher(const char* path, const char* appPath, const char* package,
 	if (icon != NULL) {
 		SetNodeIcon(file, icon);
 		delete icon;
-	}
+		// the PNG itself as the vector icon: air/OS draws it at every size
+		// and density, in Deskbar's menu too, from all of its pixels and
+		// colors (the app_server keeps such sources up to 256 KB)
+		if (iconLength <= 256 * 1024)
+			info.SetIcon(iconPng, iconLength);
+		else
+			info.SetIcon(NULL, 0);
+	} else
+		info.SetIcon(NULL, 0);
 	return 0;
 }
 
